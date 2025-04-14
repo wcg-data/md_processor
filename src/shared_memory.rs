@@ -36,3 +36,4 @@ pub fn map_shared_ring_buffer(shm_name: &str) -> io::Result<(&'static mut Shared
 
     Ok((ring_buffer, mmap))
 }
+

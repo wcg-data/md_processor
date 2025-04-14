@@ -1,10 +1,8 @@
-mod md_structures;
-mod ring_buffer;
-mod shared_memory;
-mod consumer;
+// md_processor.rs 是行情处理的主程序
 
-use shared_memory::map_shared_ring_buffer;
-use consumer::consume_loop;
+// 正确导入模块
+use md_processor::shared_memory::map_shared_ring_buffer;
+use md_processor::consumer;
 
 fn main() {
     let shm_name = "MD_SNAPSHOT_CTP";
@@ -21,5 +19,6 @@ fn main() {
         eprintln!("警告：共享内存未初始化");
     }
 
-    consume_loop(ring_buffer);
+    // 直接打印tick
+    consumer::consume_loop_tick(ring_buffer);
 }
