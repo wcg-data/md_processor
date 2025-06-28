@@ -1,3 +1,7 @@
+use crate::kafka_client;
+
+use serde::{Serialize, Deserialize};
+
 /// TickData行情快照，需与C++结构体完全一致
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +57,8 @@ impl TickData {
 }
 
 // BarData, 纯Rust结构体
-#[derive(Debug, Clone)]
+// #[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bar1Min {
     pub contract: String,         // 合约代码，如 "cu2505"
     pub contract_yymm: String,    // 合约年月，如 "2505"
@@ -82,12 +87,20 @@ pub struct Bar1Min {
     pub maturity_day: i16,
 }
 
-
 impl Bar1Min {
+
     /// 打印分钟 K 线数据（CSV 格式）
     pub fn print(&self) {
+        // use chrono::Local;
+        // use std::time::SystemTime;
+        // let now = SystemTime::now();
+        // let datetime: chrono::DateTime<Local> = now.into();
+        // println!("合并{}: {}.{:09}", self.contract,
+        //     datetime.format("%Y-%m-%d %H:%M:%S"),
+        //     now.duration_since(SystemTime::UNIX_EPOCH).unwrap().subsec_nanos()
+        // );
         println!(
-            "> {},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
+            ">>> {},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
             self.contract,
             self.contract_yymm,
             self.comd,
@@ -110,6 +123,20 @@ impl Bar1Min {
             self.vwap
         );
     }
+
+
+    // /// 向 Kafka 发送合约行情数据（Avro 格式）
+    // pub fn send_to_kafka(&self) {
+    //     // 将 Bar1Min 对象序列化为 Avro 格式
+    //     // let data = to_avro(self).expect("Failed to serialize Bar1Min to Avro");
+
+    //     // 将序列化后的 Avro 数据发送到 Kafka
+    //     let topic = "test_topic"; // Kafka 主题
+    //     let key = &self.contract; // 使用合约代码作为 key
+
+    //     // 调用 Kafka 发送函数
+    //     kafka_client::send_message(topic, key, &data);
+    // }
 }
 
 

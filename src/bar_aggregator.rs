@@ -1,7 +1,7 @@
 // bar_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
-use chrono::{DateTime, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone,Utc};
 use crate::{TickData, Bar1Min};
-use crate::string_utils::*;
+use crate::common_utils::*;
 use std::collections::HashMap;
 
 
@@ -19,13 +19,6 @@ impl BarAggregator {
         Self::default()
     }
 
-    fn align_to_bar_minute(ts: &DateTime<Utc>) -> DateTime<Utc> {
-        ts.with_second(0).unwrap().with_nanosecond(0).unwrap() + chrono::Duration::minutes(1)
-    }
-    fn floor_to_minute(ts: &DateTime<Utc>) -> DateTime<Utc> {
-        ts.with_second(0).unwrap().with_nanosecond(0).unwrap()
-    }
-
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
         let ts_str = to_string_field(&tick.trade_time);
         NaiveDateTime::parse_from_str(&ts_str, "%Y-%m-%d %H:%M:%S%.f")
@@ -36,7 +29,7 @@ impl BarAggregator {
 
     pub fn on_tick(&mut self, tick: &TickData) -> Option<Bar1Min> {
         let tick_time = Self::parse_datetime_from_tick(tick)?;
-        let tick_minute = Self::floor_to_minute(&tick_time);
+        let tick_minute = floor_to_minute(&tick_time);
 
         if let Some(current_minute) = self.current_minute {
             if tick_minute == current_minute {
@@ -119,7 +112,7 @@ impl BarAggregator {
         let comd = to_string_field(&last.comd);
         let exchange = to_string_field(&last.exchange);
         let date = to_string_field(&last.date);
-        let trade_time = Self::align_to_bar_minute(&Self::parse_datetime_from_tick(&last)?)
+        let trade_time = align_to_bar_minute(&Self::parse_datetime_from_tick(&last)?)
             .format("%Y-%m-%d %H:%M:%S").to_string();
 
         let prev_last_tick = self.prev_last_tick.unwrap_or(last);
@@ -151,7 +144,7 @@ impl BarAggregator {
             vwap: if volume == 0 { 0.0 } else { turnover / volume as f64 },
             maturity_month: 0,
             maturity_day: 0,
-        };
+        }; 
 
         // 清空状态
         self.current_minute = None;
@@ -183,7 +176,7 @@ impl AggregatorManager {
         aggr.on_tick(tick)
     }
 
-    /// 所有合约批量 flush（如时间推进触发）
+    /// 所有合约批量 flush（时间触发）
     pub fn flush_all(&mut self) -> Vec<Bar1Min> {
         self.aggregators
             .values_mut()

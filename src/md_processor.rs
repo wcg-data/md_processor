@@ -5,7 +5,7 @@ use md_processor::shared_memory::map_shared_ring_buffer;
 use md_processor::consumer;
 
 fn main() {
-    let shm_name = "MD_SNAPSHOT_CTP";
+    let shm_name = "MD_SNAPSHOT_HUATAI";
 
     let (ring_buffer, _mmap) = match map_shared_ring_buffer(shm_name) {
         Ok((rb, mmap)) => (rb, mmap),

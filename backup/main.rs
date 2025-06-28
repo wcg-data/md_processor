@@ -151,7 +151,7 @@ const KAFKA_BOOTSTRAP_SERVERS: &str = "localhost:9092";
 /// Kafka消费组ID
 const KAFKA_GROUP_ID: &str = "bar-consumer-4";
 /// 数据库连接URL
-const DB_URL: &str = "mysql://root:gXi{<ZQ2&N9ipjTtg;bE@main.mcga.work:32089/future_1d";
+const DB_URL: &str = "mysql://root:u.MTVTQYo]8xm6)FT3}T@main.mcga.work:32089/future_1d";
 /// 工作线程数上限
 const MAX_WORKER_THREADS: usize = 12;
 /// 主线程轮询间隔(毫秒)
