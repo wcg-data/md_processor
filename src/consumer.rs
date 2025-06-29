@@ -56,8 +56,6 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
             // tick.print();
             if let Some(bar) = manager.on_tick(&tick) {
                 // tick.print();
-                bar.print();
-                // bar.send_to_kafka();
             }
         } else {
             // 时间驱动强制合并：每分钟统一 flush 所有合约
@@ -66,13 +64,13 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
                 last_minute = now_minute;
                 for bar in manager.flush_all() {
                     bar.print();
-                    // bar.send_to_kafka();
+                    bar.send_to_kafka();
                 }
             }
             thread::sleep(Duration::from_millis(10));
         }
     }
-`
+
 
     // // 程序退出前flush最后一条
     println!("程序结束，输出最后一条K线数据");
@@ -86,6 +84,7 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
     // // 多合约退出
     for bar in manager.flush_all() {
         bar.print();
+        bar.send_to_kafka();
     }
     
     println!("消费者已安全退出");

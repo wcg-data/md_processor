@@ -125,18 +125,27 @@ impl Bar1Min {
     }
 
 
-    // /// 向 Kafka 发送合约行情数据（Avro 格式）
-    // pub fn send_to_kafka(&self) {
-    //     // 将 Bar1Min 对象序列化为 Avro 格式
-    //     // let data = to_avro(self).expect("Failed to serialize Bar1Min to Avro");
+    /// 向 Kafka 发送合约行情数据（JSON 格式）
+    pub fn send_to_kafka(&self) {
+        use rdkafka::ClientConfig;
+        use rdkafka::producer::BaseProducer;
+        let producer: BaseProducer = ClientConfig::new()
+        .set("bootstrap.servers", "124.220.72.118:9092")
+        .create()
+        .expect("Failed to create Kafka producer");
 
-    //     // 将序列化后的 Avro 数据发送到 Kafka
-    //     let topic = "test_topic"; // Kafka 主题
-    //     let key = &self.contract; // 使用合约代码作为 key
+        // 将 Bar1Min 对象序列化为 JSON 格式
+        let data = serde_json::to_string(self).expect("Failed to serialize Bar1Min to JSON");
 
-    //     // 调用 Kafka 发送函数
-    //     kafka_client::send_message(topic, key, &data);
-    // }
+        // Kafka 主题命名：bar_1min_{exchange}_{comd}
+        let topic = format!("bar_1min_{}_{}", self.exchange.to_lowercase(), self.comd.to_lowercase());
+
+        // 调用 Kafka 发送函数，不使用 key（传递空字符串）
+        kafka_client::send_message(&producer, &topic, "", &data);
+        
+        // 打印发送信息（用于调试）
+        println!(">>> 发送到 Kafka: topic={}", topic);
+    }
 }
 
 

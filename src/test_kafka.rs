@@ -1,18 +1,18 @@
-use md_processor::md_structures::Bar1Min;
-use md_processor::kafka_client::*;
-
-use serde::{Serialize, Deserialize};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::config::ClientConfig;
-use rdkafka::error::KafkaError;
-use std::time::Duration;
+use md_processor::kafka_client;
+use rdkafka::ClientConfig;
+use rdkafka::producer::BaseProducer;
 
 fn main() {
+    let producer: BaseProducer = ClientConfig::new()
+        .set("bootstrap.servers", "124.220.72.118:9092")
+        .create()
+        .expect("Failed to create Kafka producer");
+
     let topic = "test_topic";
     let key = "my_key";
     let message = "Hello from main!";
 
-    kafka_client::send_message(topic, key, message);
+    kafka_client::send_message(&producer, topic, key, message);
 }
 
 // /// 示例 main
