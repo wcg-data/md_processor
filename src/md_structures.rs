@@ -138,7 +138,7 @@ impl Bar1Min {
         let data = serde_json::to_string(self).expect("Failed to serialize Bar1Min to JSON");
 
         // Kafka 主题命名：bar_1min_{exchange}_{comd}
-        let topic = format!("bar_1min_{}_{}", self.exchange.to_lowercase(), self.comd.to_lowercase());
+        let topic = format!("bar_1min_{}", self.contract);
 
         // 调用 Kafka 发送函数，不使用 key（传递空字符串）
         kafka_client::send_message(&producer, &topic, "", &data);

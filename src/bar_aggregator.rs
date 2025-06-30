@@ -19,6 +19,41 @@ impl BarAggregator {
         Self::default()
     }
 
+    /// 验证 tick 数据的有效性
+    fn validate_tick(tick: &TickData) -> bool {
+        // 价格必须大于0
+        if tick.close <= 0.0 {
+            return false;
+        }
+        
+        // 成交量不能为负数
+        if tick.volume < 0 {
+            return false;
+        }
+        
+        // 成交额不能为负数
+        if tick.turnover < 0.0 {
+            return false;
+        }
+        
+        // 持仓量不能为负数
+        if tick.open_interest < 0 {
+            return false;
+        }
+        
+        // 买卖价格验证（如果有值）
+        if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 {
+            return false;
+        }
+        
+        // 买卖量验证（如果有值）
+        if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 {
+            return false;
+        }
+        
+        true
+    }
+
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
         let ts_str = to_string_field(&tick.trade_time);
         NaiveDateTime::parse_from_str(&ts_str, "%Y-%m-%d %H:%M:%S%.f")
@@ -28,6 +63,11 @@ impl BarAggregator {
     }
 
     pub fn on_tick(&mut self, tick: &TickData) -> Option<Bar1Min> {
+        // 验证 tick 数据有效性
+        if !Self::validate_tick(tick) {
+            return None;
+        }
+        
         let tick_time = Self::parse_datetime_from_tick(tick)?;
         let tick_minute = floor_to_minute(&tick_time);
 
@@ -171,6 +211,11 @@ impl AggregatorManager {
 
     /// 推入任意 tick，自动识别合约，分发给对应的 BarAggregator
     pub fn on_tick(&mut self, tick: &TickData) -> Option<Bar1Min> {
+        // 验证 tick 数据有效性
+        if !BarAggregator::validate_tick(tick) {
+            return None;
+        }
+        
         let contract = to_string_field(&tick.contract);
         let aggr = self.aggregators.entry(contract.clone()).or_insert_with(BarAggregator::new);
         aggr.on_tick(tick)
