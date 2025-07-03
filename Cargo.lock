@@ -1228,6 +1228,7 @@ dependencies = [
  "memmap2",
  "memoffset",
  "num_cpus",
+ "once_cell",
  "rdkafka",
  "schema_registry_converter",
  "serde",

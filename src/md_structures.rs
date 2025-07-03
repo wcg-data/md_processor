@@ -2,6 +2,21 @@ use crate::kafka_client;
 
 use serde::{Serialize, Deserialize};
 
+use once_cell::sync::Lazy;
+use rdkafka::producer::BaseProducer;
+use std::sync::Arc;
+
+static KAFKA_PRODUCER: Lazy<Arc<BaseProducer>> = Lazy::new(|| {
+    Arc::new(
+        rdkafka::ClientConfig::new()
+            .set("bootstrap.servers", "124.220.72.118:9092")
+            .create()
+            .expect("Failed to create Kafka producer"),
+    )
+});
+
+
+
 /// TickData行情快照，需与C++结构体完全一致
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -89,18 +104,9 @@ pub struct Bar1Min {
 
 impl Bar1Min {
 
-    /// 打印分钟 K 线数据（CSV 格式）
-    pub fn print(&self) {
-        // use chrono::Local;
-        // use std::time::SystemTime;
-        // let now = SystemTime::now();
-        // let datetime: chrono::DateTime<Local> = now.into();
-        // println!("合并{}: {}.{:09}", self.contract,
-        //     datetime.format("%Y-%m-%d %H:%M:%S"),
-        //     now.duration_since(SystemTime::UNIX_EPOCH).unwrap().subsec_nanos()
-        // );
-        println!(
-            ">>> {},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
+     pub fn build_csv_message(&self) -> String {
+        format!(
+            "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
             self.contract,
             self.contract_yymm,
             self.comd,
@@ -121,33 +127,78 @@ impl Bar1Min {
             self.ask_volume_1,
             self.mid_price,
             self.vwap
-        );
+        )
+    }
+    /// 打印分钟 K 线数据（CSV 格式）
+    pub fn print(&self) {
+        // use chrono::Local;
+        // use std::time::SystemTime;
+        // let now = SystemTime::now();
+        // let datetime: chrono::DateTime<Local> = now.into();
+        // println!("合并{}: {}.{:09}", self.contract,
+        //     datetime.format("%Y-%m-%d %H:%M:%S"),
+        //     now.duration_since(SystemTime::UNIX_EPOCH).unwrap().subsec_nanos()
+        // );
+        let message = self.build_csv_message();
+        println!("{}", message);
+
+        // println!(
+        //     ">>> {},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
+        //     self.contract,
+        //     self.contract_yymm,
+        //     self.comd,
+        //     self.exchange,
+        //     self.trade_time,
+        //     self.open,
+        //     self.high,
+        //     self.low,
+        //     self.close,
+        //     self.pre_settle,
+        //     self.volume,
+        //     self.turnover,
+        //     self.open_interest,
+        //     self.open_interest_diff,
+        //     self.bid_price_1,
+        //     self.bid_volume_1,
+        //     self.ask_price_1,
+        //     self.ask_volume_1,
+        //     self.mid_price,
+        //     self.vwap
+        // );
     }
 
-
-    /// 向 Kafka 发送合约行情数据（JSON 格式）
     pub fn send_to_kafka(&self) {
-        use rdkafka::ClientConfig;
-        use rdkafka::producer::BaseProducer;
-        let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", "124.220.72.118:9092")
-        .create()
-        .expect("Failed to create Kafka producer");
-
-        // 将 Bar1Min 对象序列化为 JSON 格式
-        let data = serde_json::to_string(self).expect("Failed to serialize Bar1Min to JSON");
-
-        // Kafka 主题命名：bar_1min_{exchange}_{comd}
-        let topic = format!("bar_1min_{}", self.contract);
-
-        // 调用 Kafka 发送函数，不使用 key（传递空字符串）
-        kafka_client::send_message(&producer, &topic, "", &data);
-        
-        // 打印发送信息（用于调试）
+        let producer = KAFKA_PRODUCER.clone(); // Arc clone，零开销
+        let topic = format!("bar_1min_{}", self.contract.trim());
+        let message = self.build_csv_message();
+    
+        kafka_client::send_message(&producer, &topic, "", &message);
         println!(">>> 发送到 Kafka: topic={}", topic);
     }
-}
+    
+    // 向 Kafka 发送合约行情数据（JSON 格式）
+    // pub fn send_to_kafka(&self) {
+    //     use rdkafka::ClientConfig;
+    //     use rdkafka::producer::BaseProducer;
+    //     let producer: BaseProducer = ClientConfig::new()
+    //     .set("bootstrap.servers", "124.220.72.118:9092")
+    //     .create()
+    //     .expect("Failed to create Kafka producer");
 
+    //     // let topic = "bar_1min_".to_string() + &self.contract;
+
+    //     let topic = format!("bar_1min_{}", self.contract.trim());
+
+    //     // let topic = "bar_1min_cu2510";
+    //     let message = self.build_csv_message();
+
+    //     // 调用 Kafka 发送函数，不使用 key（传递空字符串）
+    //     kafka_client::send_message(&producer, &topic, "", &message);
+        
+    //     // 打印发送信息（用于调试）
+    //     println!(">>> 发送到 Kafka: topic={}", topic);
+    // }
+}
 
 
 // /// 分钟K线Bar结构，兼容C结构体

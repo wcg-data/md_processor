@@ -12,7 +12,7 @@ pub fn extract_contract_yymm(contract: &str, date: &str) -> String {
     if digits.len() == 4 {
         digits
     } else if digits.len() == 3 {
-        let year_prefix = date.get(2..4).unwrap_or("00");
+        let year_prefix = date.get(2..3).unwrap_or("0");
         format!("{}{}", year_prefix, digits)
     } else {
         "".to_string()

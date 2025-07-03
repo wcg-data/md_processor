@@ -5,6 +5,7 @@ use rdkafka::producer::BaseProducer;
 fn main() {
     let producer: BaseProducer = ClientConfig::new()
         .set("bootstrap.servers", "124.220.72.118:9092")
+        // .set("bootstrap.servers", "localhost:9092")
         .create()
         .expect("Failed to create Kafka producer");
 
