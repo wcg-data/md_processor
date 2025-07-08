@@ -5,6 +5,7 @@ use serde::{Serialize, Deserialize};
 use once_cell::sync::Lazy;
 use rdkafka::producer::BaseProducer;
 use std::sync::Arc;
+use serde_json::json;
 
 static KAFKA_PRODUCER: Lazy<Arc<BaseProducer>> = Lazy::new(|| {
     Arc::new(
@@ -129,6 +130,32 @@ impl Bar1Min {
             self.vwap
         )
     }
+    pub fn build_json_message(&self) -> String {
+        let json_obj = json!({
+            "contract": self.contract,
+            "contract_yymm": self.contract_yymm,
+            "comd": self.comd,
+            "exchange": self.exchange,
+            "trade_time": self.trade_time,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "pre_settle": self.pre_settle,
+            "volume": self.volume,
+            "turnover": self.turnover,
+            "open_interest": self.open_interest,
+            "open_interest_diff": self.open_interest_diff,
+            "bid_price_1": self.bid_price_1,
+            "bid_volume_1": self.bid_volume_1,
+            "ask_price_1": self.ask_price_1,
+            "ask_volume_1": self.ask_volume_1,
+            "mid_price": self.mid_price,
+            "vwap": self.vwap,
+        });
+
+        serde_json::to_string(&json_obj).expect("构造 JSON 字符串失败")
+    }
     /// 打印分钟 K 线数据（CSV 格式）
     pub fn print(&self) {
         // use chrono::Local;
@@ -142,39 +169,26 @@ impl Bar1Min {
         let message = self.build_csv_message();
         println!("{}", message);
 
-        // println!(
-        //     ">>> {},{},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
-        //     self.contract,
-        //     self.contract_yymm,
-        //     self.comd,
-        //     self.exchange,
-        //     self.trade_time,
-        //     self.open,
-        //     self.high,
-        //     self.low,
-        //     self.close,
-        //     self.pre_settle,
-        //     self.volume,
-        //     self.turnover,
-        //     self.open_interest,
-        //     self.open_interest_diff,
-        //     self.bid_price_1,
-        //     self.bid_volume_1,
-        //     self.ask_price_1,
-        //     self.ask_volume_1,
-        //     self.mid_price,
-        //     self.vwap
-        // );
     }
 
+    // pub fn send_to_kafka(&self) {
+    //     let producer = KAFKA_PRODUCER.clone(); // Arc clone，零开销
+    //     let topic = format!("bar_1min_{}", self.contract.trim());
+    //     let message = self.build_csv_message();
+    
+    //     kafka_client::send_message(&producer, &topic, "", &message);
+    //     println!(">>> 发送到 Kafka: topic={}", topic);
+    // }
+
     pub fn send_to_kafka(&self) {
-        let producer = KAFKA_PRODUCER.clone(); // Arc clone，零开销
+        let producer = KAFKA_PRODUCER.clone();
         let topic = format!("bar_1min_{}", self.contract.trim());
-        let message = self.build_csv_message();
+        let message = self.build_json_message(); // 生成指定字段的 JSON
     
         kafka_client::send_message(&producer, &topic, "", &message);
-        println!(">>> 发送到 Kafka: topic={}", topic);
+        println!(">>> 发送到 Kafka: topic={}, message={}", topic, message);
     }
+    
     
     // 向 Kafka 发送合约行情数据（JSON 格式）
     // pub fn send_to_kafka(&self) {
