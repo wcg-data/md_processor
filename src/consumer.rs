@@ -11,7 +11,7 @@ use crate::bar_aggregator::AggregatorManager;
 
 /// 消费循环，读取tick数据并处理
 pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
-    println!("消费者启动，等待数据...");
+    println!("tick消费者启动，等待数据...");
     
     // 创建信号处理的标志，用于优雅退出
     let running = Arc::new(AtomicBool::new(true));
@@ -71,9 +71,9 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
         }
     }
 
-
+    
     // // 程序退出前flush最后一条
-    println!("程序结束，输出最后一条K线数据");
+    println!("tick消费者程序结束，输出最后一条K线数据");
 
     // // 单合约退出
     // if let Some(bar) = aggregator.flush() {
@@ -87,5 +87,5 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer) {
         bar.send_to_kafka();
     }
     
-    println!("消费者已安全退出");
+    println!("tick消费者已安全退出");
 }
