@@ -21,36 +21,12 @@ impl BarAggregator {
 
     /// 验证 tick 数据的有效性
     fn validate_tick(tick: &TickData) -> bool {
-        // 价格必须大于0
-        if tick.close <= 0.0 {
-            return false;
-        }
-        
-        // 成交量不能为负数
-        if tick.volume < 0 {
-            return false;
-        }
-        
-        // 成交额不能为负数
-        if tick.turnover < 0.0 {
-            return false;
-        }
-        
-        // 持仓量不能为负数
-        if tick.open_interest < 0 {
-            return false;
-        }
-        
-        // 买卖价格验证（如果有值）
-        if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 {
-            return false;
-        }
-        
-        // 买卖量验证（如果有值）
-        if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 {
-            return false;
-        }
-        
+        if tick.close <= 0.0 { return false; }
+        if tick.volume < 0 { return false; }
+        if tick.turnover < 0.0 { return false; }
+        if tick.open_interest < 0 { return false; }
+        if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 { return false; }
+        if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 { return false; }
         true
     }
 
@@ -111,6 +87,7 @@ impl BarAggregator {
                     .format("%Y-%m-%d %H:%M:%S")
                     .to_string();
 
+                // 空 bar 的 log_return 设为 0.0
                 let bar = Bar1Min {
                     contract: contract.clone(),
                     contract_yymm: extract_contract_yymm(&contract, &date),
@@ -133,6 +110,7 @@ impl BarAggregator {
                     ask_volume_1: prev.ask_volume_1,
                     mid_price: prev.mid_price,
                     vwap: prev.close,
+                    log_return: std::f64::NAN, // 无pre_close，无法计算log_return
                     maturity_month: 0,
                     maturity_day: 0,
                 };
@@ -160,6 +138,13 @@ impl BarAggregator {
         let turnover = (last.turnover - prev_last_tick.turnover).max(0.0);
         let oi_diff = last.open_interest.wrapping_sub(prev_last_tick.open_interest) as i32;
 
+        // 计算 log_return，若 prev_last_tick.close <= 0 则返回 0.0 以避免非法对数
+        let log_return = if prev_last_tick.close > 0.0 {
+            (last.close / prev_last_tick.close).ln()
+        } else {
+            std::f64::NAN
+        };
+
         let bar = Bar1Min {
             contract: contract.clone(),
             contract_yymm: extract_contract_yymm(&contract, &date),
@@ -182,9 +167,10 @@ impl BarAggregator {
             ask_volume_1: last.ask_volume_1,
             mid_price: last.mid_price,
             vwap: if volume == 0 { 0.0 } else { turnover / volume as f64 },
+            log_return,
             maturity_month: 0,
             maturity_day: 0,
-        }; 
+        };
 
         // 清空状态
         self.current_minute = None;

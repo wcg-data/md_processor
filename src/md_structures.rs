@@ -99,6 +99,7 @@ pub struct Bar1Min {
     pub ask_volume_1: u32,
     pub mid_price: f64,
     pub vwap: f64,
+    pub log_return: f64,
     pub maturity_month: i16,
     pub maturity_day: i16,
 }
@@ -107,7 +108,7 @@ impl Bar1Min {
 
      pub fn build_csv_message(&self) -> String {
         format!(
-            "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5}",
+            "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5},{:.5}",
             self.contract,
             self.contract_yymm,
             self.comd,
@@ -127,7 +128,8 @@ impl Bar1Min {
             self.ask_price_1,
             self.ask_volume_1,
             self.mid_price,
-            self.vwap
+            self.vwap,
+            self.log_return
         )
     }
     pub fn build_json_message(&self) -> String {
@@ -152,6 +154,7 @@ impl Bar1Min {
             "ask_volume_1": self.ask_volume_1,
             "mid_price": self.mid_price,
             "vwap": self.vwap,
+            "log_return": self.log_return
         });
 
         serde_json::to_string(&json_obj).expect("构造 JSON 字符串失败")
