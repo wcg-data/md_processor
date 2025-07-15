@@ -27,6 +27,8 @@ fn main() {
         eprintln!("警告：共享内存未初始化");
     }
 
+    let mode = consumer::AggregationMode::Multi;
+
     // 直接打印tick
-    consumer::consume_loop_tick(ring_buffer);
+    consumer::consume_loop_tick(ring_buffer, mode);
 }

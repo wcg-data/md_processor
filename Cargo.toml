@@ -21,6 +21,7 @@ clickhouse = "0.3.0"
 anyhow = "1.0"
 once_cell = "1.19.0"
 schema_registry_converter = { version = "4.0", features = ["avro"] }
+csv = "1.3"
 
 [[bin]]
 name = "md_processor"
@@ -29,3 +30,7 @@ path = "src/md_processor.rs"
 [[bin]]
 name = "test_kafka"
 path = "src/test_kafka.rs"
+
+[[bin]]
+name = "trade_session_loader"
+path = "src/trade_session_loader.rs"

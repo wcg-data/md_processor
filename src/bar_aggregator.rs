@@ -2,12 +2,12 @@
 use chrono::{DateTime, NaiveDateTime, TimeZone,Utc};
 use crate::{TickData, Bar1Min};
 use crate::common_utils::*;
-use std::collections::HashMap;
-
+use std::collections::{HashMap, HashSet};
+use crate::trade_session_loader::SESSION_MAP;
 
 #[derive(Default)]
 pub struct BarAggregator {
-    pub current_minute: Option<DateTime<Utc>>,
+    pub current_bar_minute: Option<DateTime<Utc>>,
     pub last_tick: Option<TickData>,
     pub prev_last_tick: Option<TickData>,
     pub high: Option<f64>,
@@ -19,15 +19,35 @@ impl BarAggregator {
         Self::default()
     }
 
-    /// 验证 tick 数据的有效性
+    // /// 验证 tick 数据的有效性
+    // fn validate_tick(tick: &TickData) -> bool {
+    //     if tick.close <= 0.0 { return false; }
+    //     if tick.volume < 0 { return false; }
+    //     if tick.turnover < 0.0 { return false; }
+    //     if tick.open_interest < 0 { return false; }
+    //     if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 { return false; }
+    //     if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 { return false; }
+    //     true
+    // }
+
     fn validate_tick(tick: &TickData) -> bool {
+        // ---------- 数值校验 ----------
         if tick.close <= 0.0 { return false; }
         if tick.volume < 0 { return false; }
         if tick.turnover < 0.0 { return false; }
         if tick.open_interest < 0 { return false; }
         if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 { return false; }
         if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 { return false; }
-        true
+
+        // ---------- 时段合法性 ----------
+        let dt = match Self::parse_datetime_from_tick(tick) {
+            Some(t) => t,
+            None => return false,            // 解析失败 → 判无效
+        };
+        let time = dt.time();                // NaiveTime
+        let comd = to_string_field(&tick.comd);
+
+        SESSION_MAP.is_in_trading_session(&comd, time)
     }
 
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
@@ -39,16 +59,12 @@ impl BarAggregator {
     }
 
     pub fn on_tick(&mut self, tick: &TickData) -> Option<Bar1Min> {
-        // 验证 tick 数据有效性
-        if !Self::validate_tick(tick) {
-            return None;
-        }
-        
+
         let tick_time = Self::parse_datetime_from_tick(tick)?;
         let tick_minute = floor_to_minute(&tick_time);
 
-        if let Some(current_minute) = self.current_minute {
-            if tick_minute == current_minute {
+        if let Some(current_bar_minute) = self.current_bar_minute {
+            if tick_minute == current_bar_minute {
                 self.last_tick = Some(*tick);
                 self.high = Some(self.high.map_or(tick.close, |h| h.max(tick.close)));
                 self.low = Some(self.low.map_or(tick.close, |l| l.min(tick.close)));
@@ -71,7 +87,7 @@ impl BarAggregator {
         self.last_tick = Some(*tick);
         self.high = Some(tick.close);
         self.low = Some(tick.close);
-        self.current_minute = Some(tick_minute);
+        self.current_bar_minute = Some(tick_minute);
     }
 
     pub fn flush(&mut self) -> Option<Bar1Min> {
@@ -82,7 +98,7 @@ impl BarAggregator {
                 let comd = to_string_field(&prev.comd);
                 let exchange = to_string_field(&prev.exchange);
                 let date = to_string_field(&prev.date);
-                let trade_time = self.current_minute
+                let trade_time = self.current_bar_minute
                     .unwrap_or_else(|| Utc::now())
                     .format("%Y-%m-%d %H:%M:%S")
                     .to_string();
@@ -115,7 +131,7 @@ impl BarAggregator {
                     maturity_day: 0,
                 };
 
-                self.current_minute = None;
+                self.current_bar_minute = None;
                 self.high = None;
                 self.low = None;
 
@@ -173,7 +189,7 @@ impl BarAggregator {
         };
 
         // 清空状态
-        self.current_minute = None;
+        self.current_bar_minute = None;
         self.prev_last_tick = self.last_tick;
         self.last_tick = None;
         self.high = None;
@@ -183,7 +199,7 @@ impl BarAggregator {
     }
 }
 
-
+// ------------------------------ 多合约管理器 ------------------------------
 /// 多合约管理器
 #[derive(Default)]
 pub struct AggregatorManager {
@@ -193,6 +209,15 @@ pub struct AggregatorManager {
 impl AggregatorManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // 初次启动，快速消化挤压tick，批量处理 tick，自动识别合约，分发给对应的 BarAggregator
+    pub fn on_ticks(&mut self, batch: &[TickData], out: &mut Vec<Bar1Min>) {
+        for tick in batch {
+            if let Some(bar) = self.on_tick(tick) {   // 利用原有 on_tick
+                out.push(bar);
+            }
+        }
     }
 
     /// 推入任意 tick，自动识别合约，分发给对应的 BarAggregator
@@ -206,6 +231,8 @@ impl AggregatorManager {
         let aggr = self.aggregators.entry(contract.clone()).or_insert_with(BarAggregator::new);
         aggr.on_tick(tick)
     }
+
+    
 
     /// 所有合约批量 flush（时间触发）
     pub fn flush_all(&mut self) -> Vec<Bar1Min> {

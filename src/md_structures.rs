@@ -16,8 +16,6 @@ static KAFKA_PRODUCER: Lazy<Arc<BaseProducer>> = Lazy::new(|| {
     )
 });
 
-
-
 /// TickData行情快照，需与C++结构体完全一致
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
