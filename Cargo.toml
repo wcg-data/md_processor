@@ -34,3 +34,7 @@ path = "src/test_kafka.rs"
 [[bin]]
 name = "trade_session_loader"
 path = "src/trade_session_loader.rs"
+
+[[bin]]
+name = "reset_tail"
+path = "src/reset_tail.rs"

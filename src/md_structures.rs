@@ -3,9 +3,11 @@ use crate::kafka_client;
 use serde::{Serialize, Deserialize};
 
 use once_cell::sync::Lazy;
-use rdkafka::producer::BaseProducer;
 use std::sync::Arc;
 use serde_json::json;
+use std::time::Duration;   
+use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+
 
 static KAFKA_PRODUCER: Lazy<Arc<BaseProducer>> = Lazy::new(|| {
     Arc::new(
@@ -159,19 +161,23 @@ impl Bar1Min {
     }
     /// 打印分钟 K 线数据（CSV 格式）
     pub fn print(&self) {
-        // use chrono::Local;
-        // use std::time::SystemTime;
-        // let now = SystemTime::now();
-        // let datetime: chrono::DateTime<Local> = now.into();
-        // println!("合并{}: {}.{:09}", self.contract,
-        //     datetime.format("%Y-%m-%d %H:%M:%S"),
-        //     now.duration_since(SystemTime::UNIX_EPOCH).unwrap().subsec_nanos()
-        // );
         let message = self.build_csv_message();
         println!("{}", message);
 
     }
 
+
+    // // 向 Kafka 发送合约行情数据（JSON 格式）
+    // pub fn send_to_kafka(&self) {
+    //     let producer = KAFKA_PRODUCER.clone();
+    //     let topic = format!("bar_1min_{}", self.contract.trim());
+    //     let message = self.build_json_message(); // 生成指定字段的 JSON
+    
+    //     kafka_client::send_message(&producer, &topic, "", &message);
+    //     println!(">>> 发送到 Kafka: topic={}, message={}", topic, message);
+    // }
+
+    // 向 Kafka 发送合约行情数据（CSV 格式）
     // pub fn send_to_kafka(&self) {
     //     let producer = KAFKA_PRODUCER.clone(); // Arc clone，零开销
     //     let topic = format!("bar_1min_{}", self.contract.trim());
@@ -180,41 +186,10 @@ impl Bar1Min {
     //     kafka_client::send_message(&producer, &topic, "", &message);
     //     println!(">>> 发送到 Kafka: topic={}", topic);
     // }
-
-    pub fn send_to_kafka(&self) {
-        let producer = KAFKA_PRODUCER.clone();
-        let topic = format!("bar_1min_{}", self.contract.trim());
-        let message = self.build_json_message(); // 生成指定字段的 JSON
-    
-        kafka_client::send_message(&producer, &topic, "", &message);
-        println!(">>> 发送到 Kafka: topic={}, message={}", topic, message);
-    }
-    
-    
-    // 向 Kafka 发送合约行情数据（JSON 格式）
-    // pub fn send_to_kafka(&self) {
-    //     use rdkafka::ClientConfig;
-    //     use rdkafka::producer::BaseProducer;
-    //     let producer: BaseProducer = ClientConfig::new()
-    //     .set("bootstrap.servers", "124.220.72.118:9092")
-    //     .create()
-    //     .expect("Failed to create Kafka producer");
-
-    //     // let topic = "bar_1min_".to_string() + &self.contract;
-
-    //     let topic = format!("bar_1min_{}", self.contract.trim());
-
-    //     // let topic = "bar_1min_cu2510";
-    //     let message = self.build_csv_message();
-
-    //     // 调用 Kafka 发送函数，不使用 key（传递空字符串）
-    //     kafka_client::send_message(&producer, &topic, "", &message);
-        
-    //     // 打印发送信息（用于调试）
-    //     println!(">>> 发送到 Kafka: topic={}", topic);
-    // }
 }
 
+
+//=======================================定义兼容C结构体的Bar1Min===================================
 
 // /// 分钟K线Bar结构，兼容C结构体
 // #[repr(C)]

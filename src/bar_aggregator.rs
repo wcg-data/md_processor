@@ -19,37 +19,80 @@ impl BarAggregator {
         Self::default()
     }
 
-    // /// 验证 tick 数据的有效性
-    // fn validate_tick(tick: &TickData) -> bool {
-    //     if tick.close <= 0.0 { return false; }
-    //     if tick.volume < 0 { return false; }
-    //     if tick.turnover < 0.0 { return false; }
-    //     if tick.open_interest < 0 { return false; }
-    //     if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 { return false; }
-    //     if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 { return false; }
-    //     true
-    // }
 
+    /// 验证 Tick 数据是否有效
+    /// 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
     fn validate_tick(tick: &TickData) -> bool {
-        // ---------- 数值校验 ----------
-        if tick.close <= 0.0 { return false; }
-        if tick.volume < 0 { return false; }
-        if tick.turnover < 0.0 { return false; }
-        if tick.open_interest < 0 { return false; }
-        if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 { return false; }
-        if tick.bid_volume_1 < 0 || tick.ask_volume_1 < 0 { return false; }
+        // ---------- 基本数值校验 ----------
+        // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
+        if tick.open <= 0.0 { return false; }
+        if tick.high <= 0.0 { return false; }
+        if tick.low <= 0.0 { return false; }
+        if !tick.close.is_finite() || tick.close <= 0.0 { return false; }
 
-        // ---------- 时段合法性 ----------
+        // 昨日结算价需有效且大于0（用于涨跌停等校验）
+        if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
+
+        // 成交额不能为负（允许为 0）
+        if tick.turnover < 0.0 { return false; }
+
+        // 买卖一价必须大于 0
+        if tick.bid_price_1 <= 0.0 { return false; }
+        if tick.ask_price_1 <= 0.0 { return false; }
+
+        // 买一价不能大于卖一价（防止撮合错误）
+        if tick.bid_price_1 > tick.ask_price_1 { return false; }
+
+        // ---------- 合理价格区间校验 ----------
+        // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系
+        if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
+            if tick.high < tick.low { return false; }              // high 必须 ≥ low
+            if tick.open < tick.low || tick.open > tick.high {     // open 必须在区间内
+                return false;
+            }
+            if tick.close < tick.low || tick.close > tick.high {   // close 必须在区间内
+                return false;
+            }
+        }
+
+        // ---------- 成交量与成交额的一致性校验 ----------
+        // 要求：
+        // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
+        // - volume > 0 时，turnover 必须为正
+        if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+            || (tick.volume > 0 && tick.turnover > 0.0)) {
+            return false;
+        }
+
+        // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
+        let eps = 1e-6; // 容差，避免浮点误差带来的误判
+
+        if tick.volume > 0
+            && tick.turnover.is_finite()
+            && tick.low.is_finite()
+            && tick.high.is_finite()
+        {
+            let avg_price = tick.turnover / tick.volume as f64;
+            if avg_price < tick.low - eps || avg_price > tick.high + eps {
+                return false;
+            }
+        }
+
+        // ---------- 时段合法性校验 ----------
+        // 从 tick 中提取 datetime（自定义解析函数）
         let dt = match Self::parse_datetime_from_tick(tick) {
             Some(t) => t,
-            None => return false,            // 解析失败 → 判无效
+            None => return false, // 若无法解析时间戳，判为无效
         };
-        let time = dt.time();                // NaiveTime
-        let comd = to_string_field(&tick.comd);
 
+        // 获取时间部分（NaiveTime）用于交易时段判断
+        let time = dt.time();
+        let comd = to_string_field(&tick.comd); // 提取合约标识
+
+        // 判断是否在交易时间段内（依赖 SESSION_MAP）
         SESSION_MAP.is_in_trading_session(&comd, time)
     }
-
+    
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
         let ts_str = to_string_field(&tick.trade_time);
         NaiveDateTime::parse_from_str(&ts_str, "%Y-%m-%d %H:%M:%S%.f")
@@ -204,20 +247,12 @@ impl BarAggregator {
 #[derive(Default)]
 pub struct AggregatorManager {
     aggregators: HashMap<String, BarAggregator>,
+    dirty: HashSet<String>,                 // ★ 本分钟出现过 tick 的合约
 }
 
 impl AggregatorManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    // 初次启动，快速消化挤压tick，批量处理 tick，自动识别合约，分发给对应的 BarAggregator
-    pub fn on_ticks(&mut self, batch: &[TickData], out: &mut Vec<Bar1Min>) {
-        for tick in batch {
-            if let Some(bar) = self.on_tick(tick) {   // 利用原有 on_tick
-                out.push(bar);
-            }
-        }
     }
 
     /// 推入任意 tick，自动识别合约，分发给对应的 BarAggregator
@@ -231,8 +266,6 @@ impl AggregatorManager {
         let aggr = self.aggregators.entry(contract.clone()).or_insert_with(BarAggregator::new);
         aggr.on_tick(tick)
     }
-
-    
 
     /// 所有合约批量 flush（时间触发）
     pub fn flush_all(&mut self) -> Vec<Bar1Min> {

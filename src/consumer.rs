@@ -7,6 +7,7 @@ use chrono::{Timelike, Utc};
 use crate::ring_buffer::SharedRingBuffer;
 use crate::bar_aggregator::BarAggregator;
 use crate::bar_aggregator::AggregatorManager;
+use crate::kafka_client;
 
 
 /// 枚举聚合模式：单合约或多合约
@@ -36,6 +37,7 @@ pub fn consume_loop_tick(ring_buffer: &mut SharedRingBuffer, mode: AggregationMo
     })
     .expect("无法设置 Ctrl+C 处理器");
 
+    
     match mode {
         AggregationMode::Single(contracts) => single_contract_loop(ring_buffer, &running, contracts),
         AggregationMode::Multi => multi_contract_loop(ring_buffer, &running),
@@ -61,8 +63,9 @@ fn single_contract_loop(
                 if contracts_filter.contains(&contract_str) {
                     // tick.print(); // 如需调试可解除注释
                     if let Some(bar) = aggregator.on_tick(&tick) {
-                        bar.print();
-                        bar.send_to_kafka();
+                        // bar.print();
+                        // bar.send_to_kafka();
+                        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
                     }
                 }
             }
@@ -72,24 +75,28 @@ fn single_contract_loop(
 
     // 程序退出前 flush 最后一条
     if let Some(bar) = aggregator.flush() {
-        bar.print();
-        bar.send_to_kafka();
+        // bar.print();
+        // bar.send_to_kafka();
+        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
     }
 }
 
-/// 多合约聚合处理
+// 多合约聚合处理
 fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicBool>) {
     let mut manager = AggregatorManager::new();
     let mut last_minute = Utc::now().minute();
-
-    // let mut tick_batch: Vec<TickData> = Vec::with_capacity(4096);   // 批量缓存
 
     while running.load(Ordering::SeqCst) {
         if let Some(tick) = ring_buffer.pop_market_data() {
             // tick.print(); // 如需调试可解除注释
             if let Some(bar) = manager.on_tick(&tick) {
                 // bar.print();  // 若需要实时查看可解除注释
-                bar.send_to_kafka();
+                // bar.send_to_kafka();
+                //打印当前时间，格式为：2025-07-17 10:00:00.000
+                let now = Utc::now();
+                let formatted_time = now.format("%Y-%m-%d %H:%M:%S.%3f");
+                println!("当前时间：{}", formatted_time);
+                kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
             }
         } else {
             // 时间驱动强制合并: 每分钟统一 flush 所有合约
@@ -98,7 +105,12 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
                 last_minute = now_minute;
                 for bar in manager.flush_all() {
                     // bar.print();
-                    bar.send_to_kafka();
+                    // bar.send_to_kafka();
+                    //打印当前时间，格式为：2025-07-17 10:00:00.000
+                    let now = Utc::now();
+                    let formatted_time = now.format("%Y-%m-%d %H:%M:%S.%3f");
+                    println!("当前时间：{}", formatted_time);
+                    kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -107,7 +119,9 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
 
     // 程序退出前 flush 最后一批
     for bar in manager.flush_all() {
-        bar.print();
-        bar.send_to_kafka();
+        // bar.print();
+        // bar.send_to_kafka();
+        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
     }
 }
+
