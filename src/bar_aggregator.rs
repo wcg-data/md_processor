@@ -1,9 +1,13 @@
 // bar_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
-use chrono::{DateTime, NaiveDateTime, TimeZone,Utc};
+/// bar聚合器
+
+use chrono::{DateTime, NaiveDateTime, NaiveTime, TimeZone,Utc,FixedOffset,Local};
 use crate::{TickData, Bar1Min};
 use crate::common_utils::*;
 use std::collections::{HashMap, HashSet};
-use crate::trade_session_loader::SESSION_MAP;
+use crate::trade_session_loader::TRADE_SESSION_MAP;
+use crate::trade_session_loader::TradeSessionMap;
+
 
 #[derive(Default)]
 pub struct BarAggregator {
@@ -22,7 +26,7 @@ impl BarAggregator {
 
     /// 验证 Tick 数据是否有效
     /// 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
-    fn validate_tick(tick: &TickData) -> bool {
+    pub fn validate_tick(tick: &TickData) -> bool {
         // ---------- 基本数值校验 ----------
         // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
         if tick.open <= 0.0 { return false; }
@@ -89,8 +93,8 @@ impl BarAggregator {
         let time = dt.time();
         let comd = to_string_field(&tick.comd); // 提取合约标识
 
-        // 判断是否在交易时间段内（依赖 SESSION_MAP）
-        SESSION_MAP.is_in_trading_session(&comd, time)
+        // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+        TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
     }
     
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
@@ -143,6 +147,7 @@ impl BarAggregator {
                 let date = to_string_field(&prev.date);
                 let trade_time = self.current_bar_minute
                     .unwrap_or_else(|| Utc::now())
+                    .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())  // ← 转为 UTC+8
                     .format("%Y-%m-%d %H:%M:%S")
                     .to_string();
 
@@ -241,37 +246,3 @@ impl BarAggregator {
         Some(bar)
     }
 }
-
-// ------------------------------ 多合约管理器 ------------------------------
-/// 多合约管理器
-#[derive(Default)]
-pub struct AggregatorManager {
-    aggregators: HashMap<String, BarAggregator>,
-    dirty: HashSet<String>,                 // ★ 本分钟出现过 tick 的合约
-}
-
-impl AggregatorManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 推入任意 tick，自动识别合约，分发给对应的 BarAggregator
-    pub fn on_tick(&mut self, tick: &TickData) -> Option<Bar1Min> {
-        // 验证 tick 数据有效性
-        if !BarAggregator::validate_tick(tick) {
-            return None;
-        }
-        
-        let contract = to_string_field(&tick.contract);
-        let aggr = self.aggregators.entry(contract.clone()).or_insert_with(BarAggregator::new);
-        aggr.on_tick(tick)
-    }
-
-    /// 所有合约批量 flush（时间触发）
-    pub fn flush_all(&mut self) -> Vec<Bar1Min> {
-        self.aggregators
-            .values_mut()
-            .filter_map(|aggr| aggr.flush())
-            .collect()
-    }
-} 

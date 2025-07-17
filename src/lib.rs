@@ -6,6 +6,7 @@ pub mod bar_aggregator;
 pub mod common_utils;
 pub mod kafka_client;
 pub mod trade_session_loader;
+pub mod aggregator_manager;
 
 // 重新导出 TickData 和 Bar1Min 结构体到根模块
 pub use md_structures::{TickData, Bar1Min};

@@ -3,10 +3,11 @@
 use std::{collections::HashSet, thread, time::Duration};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use chrono::{Timelike, Utc};
+use chrono::{Timelike, Utc, Local};
 use crate::ring_buffer::SharedRingBuffer;
 use crate::bar_aggregator::BarAggregator;
-use crate::bar_aggregator::AggregatorManager;
+use crate::aggregator_manager::AggregatorManager;
+
 use crate::kafka_client;
 
 
@@ -65,7 +66,7 @@ fn single_contract_loop(
                     if let Some(bar) = aggregator.on_tick(&tick) {
                         // bar.print();
                         // bar.send_to_kafka();
-                        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
+                        kafka_client::send_bar_1min(&bar);
                     }
                 }
             }
@@ -77,51 +78,43 @@ fn single_contract_loop(
     if let Some(bar) = aggregator.flush() {
         // bar.print();
         // bar.send_to_kafka();
-        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
+        kafka_client::send_bar_1min(&bar);
     }
 }
 
 // 多合约聚合处理
 fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicBool>) {
     let mut manager = AggregatorManager::new();
-    let mut last_minute = Utc::now().minute();
+    let mut last_minute = Local::now().minute();
 
     while running.load(Ordering::SeqCst) {
+        let now_minute = Local::now().minute();
+        if now_minute != last_minute {
+            last_minute = now_minute;
+            for bar in manager.flush_all_active() {
+                println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
+                bar.print();
+                // kafka_client::send_bar_1min(&bar);
+            }
+        }
+    
         if let Some(tick) = ring_buffer.pop_market_data() {
-            // tick.print(); // 如需调试可解除注释
             if let Some(bar) = manager.on_tick(&tick) {
-                // bar.print();  // 若需要实时查看可解除注释
-                // bar.send_to_kafka();
-                //打印当前时间，格式为：2025-07-17 10:00:00.000
-                let now = Utc::now();
-                let formatted_time = now.format("%Y-%m-%d %H:%M:%S.%3f");
-                println!("当前时间：{}", formatted_time);
-                kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
+                println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
+                bar.print();
+                // kafka_client::send_bar_1min(&bar);
             }
         } else {
-            // 时间驱动强制合并: 每分钟统一 flush 所有合约
-            let now_minute = Utc::now().minute();
-            if now_minute != last_minute {
-                last_minute = now_minute;
-                for bar in manager.flush_all() {
-                    // bar.print();
-                    // bar.send_to_kafka();
-                    //打印当前时间，格式为：2025-07-17 10:00:00.000
-                    let now = Utc::now();
-                    let formatted_time = now.format("%Y-%m-%d %H:%M:%S.%3f");
-                    println!("当前时间：{}", formatted_time);
-                    kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(5));
         }
     }
+    
 
     // 程序退出前 flush 最后一批
-    for bar in manager.flush_all() {
-        // bar.print();
-        // bar.send_to_kafka();
-        kafka_client::send_bar_1min(&bar).unwrap_or_else(|e| eprintln!("发送失败: {:?}", e));
+    for bar in manager.flush_all_active() {
+        println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
+        bar.print();
+        // kafka_client::send_bar_1min(&bar);
     }
 }
 

@@ -106,7 +106,7 @@ pub struct Bar1Min {
 
 impl Bar1Min {
 
-     pub fn build_csv_message(&self) -> String {
+    pub fn build_csv_message(&self) -> String {
         format!(
             "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5},{:.5}",
             self.contract,
@@ -167,25 +167,6 @@ impl Bar1Min {
     }
 
 
-    // // 向 Kafka 发送合约行情数据（JSON 格式）
-    // pub fn send_to_kafka(&self) {
-    //     let producer = KAFKA_PRODUCER.clone();
-    //     let topic = format!("bar_1min_{}", self.contract.trim());
-    //     let message = self.build_json_message(); // 生成指定字段的 JSON
-    
-    //     kafka_client::send_message(&producer, &topic, "", &message);
-    //     println!(">>> 发送到 Kafka: topic={}, message={}", topic, message);
-    // }
-
-    // 向 Kafka 发送合约行情数据（CSV 格式）
-    // pub fn send_to_kafka(&self) {
-    //     let producer = KAFKA_PRODUCER.clone(); // Arc clone，零开销
-    //     let topic = format!("bar_1min_{}", self.contract.trim());
-    //     let message = self.build_csv_message();
-    
-    //     kafka_client::send_message(&producer, &topic, "", &message);
-    //     println!(">>> 发送到 Kafka: topic={}", topic);
-    // }
 }
 
 
