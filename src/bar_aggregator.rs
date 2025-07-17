@@ -1,15 +1,12 @@
 // bar_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
 /// bar聚合器
 
-use chrono::{DateTime, NaiveDateTime, NaiveTime, TimeZone,Utc,FixedOffset,Local};
+use chrono::{DateTime, NaiveDateTime, TimeZone,Utc,FixedOffset};
 use crate::{TickData, Bar1Min};
 use crate::common_utils::*;
-use std::collections::{HashMap, HashSet};
 use crate::trade_session_loader::TRADE_SESSION_MAP;
-use crate::trade_session_loader::TradeSessionMap;
 
-
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct BarAggregator {
     pub current_bar_minute: Option<DateTime<Utc>>,
     pub last_tick: Option<TickData>,
@@ -22,7 +19,6 @@ impl BarAggregator {
     pub fn new() -> Self {
         Self::default()
     }
-
 
     /// 验证 Tick 数据是否有效
     /// 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等

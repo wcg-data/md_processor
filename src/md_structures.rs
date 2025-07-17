@@ -1,22 +1,6 @@
-use crate::kafka_client;
-
 use serde::{Serialize, Deserialize};
 
-use once_cell::sync::Lazy;
-use std::sync::Arc;
 use serde_json::json;
-use std::time::Duration;   
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-
-
-static KAFKA_PRODUCER: Lazy<Arc<BaseProducer>> = Lazy::new(|| {
-    Arc::new(
-        rdkafka::ClientConfig::new()
-            .set("bootstrap.servers", "124.220.72.118:9092")
-            .create()
-            .expect("Failed to create Kafka producer"),
-    )
-});
 
 /// TickData行情快照，需与C++结构体完全一致
 #[repr(C)]

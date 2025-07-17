@@ -63,7 +63,7 @@ impl TradeSessionMap {
 /* ---------- 全局静态，程序启动第一次用到时自动加载 ---------- */
 pub static TRADE_SESSION_MAP: Lazy<TradeSessionMap> = Lazy::new(|| {
     // 视情况改成绝对路径或 env 变量
-    TradeSessionMap::load_from_csv("trade_session.csv")
+    TradeSessionMap::load_from_csv("/root/project/md_processor/trade_session.csv")
 });
 
 // // 测试代码

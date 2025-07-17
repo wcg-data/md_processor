@@ -3,13 +3,12 @@
 use std::{collections::HashSet, thread, time::Duration};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use chrono::{Timelike, Utc, Local};
+use chrono::{Timelike, Local};
 use crate::ring_buffer::SharedRingBuffer;
 use crate::bar_aggregator::BarAggregator;
 use crate::aggregator_manager::AggregatorManager;
 
 use crate::kafka_client;
-
 
 /// 枚举聚合模式：单合约或多合约
 pub enum AggregationMode {
@@ -93,16 +92,16 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
             last_minute = now_minute;
             for bar in manager.flush_all_active() {
                 println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-                bar.print();
-                // kafka_client::send_bar_1min(&bar);
+                // bar.print();
+                kafka_client::send_bar_1min(&bar);
             }
         }
     
         if let Some(tick) = ring_buffer.pop_market_data() {
             if let Some(bar) = manager.on_tick(&tick) {
                 println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-                bar.print();
-                // kafka_client::send_bar_1min(&bar);
+                // bar.print();
+                kafka_client::send_bar_1min(&bar);
             }
         } else {
             thread::sleep(Duration::from_millis(5));
@@ -113,8 +112,8 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
     // 程序退出前 flush 最后一批
     for bar in manager.flush_all_active() {
         println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-        bar.print();
-        // kafka_client::send_bar_1min(&bar);
+        // bar.print();
+        kafka_client::send_bar_1min(&bar);
     }
 }
 

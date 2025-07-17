@@ -8,8 +8,9 @@ use crate::md_structures::{TickData, Bar1Min};
 use crate::bar_aggregator::{BarAggregator};   // 来自 bar_aggregator.rs
 use crate::trade_session_loader::TradeSessionMap;       // 来自 trade_session 模块
 use crate::common_utils::*;                      // 你的工具函数模块
+use rayon::prelude::*;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct AggregatorManager {
     aggregators: HashMap<String, BarAggregator>,
     active_contracts: HashSet<String>,
@@ -59,7 +60,8 @@ impl AggregatorManager {
 
     pub fn flush_all_active(&mut self) -> Vec<Bar1Min> {
         self.aggregators
-            .iter_mut()
+            // .iter_mut() // ← 串行遍历
+            .par_iter_mut() // ← 并行遍历
             .filter_map(|(contract, aggr)| {
                 if self.active_contracts.contains(contract) {
                     aggr.flush()
