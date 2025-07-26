@@ -1,7 +1,7 @@
 // common_utils, 处理字符串和时间相关函数
 
 use chrono::{DateTime, Timelike, Utc};
-
+use chrono::TimeZone; 
 
 pub fn to_string_field(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).trim_end_matches('\0').to_string()
@@ -23,6 +23,11 @@ pub fn align_to_bar_minute(ts: &DateTime<Utc>) -> DateTime<Utc> {
     ts.with_second(0).unwrap().with_nanosecond(0).unwrap() + chrono::Duration::minutes(1)
 }
 
-pub fn floor_to_minute(ts: &DateTime<Utc>) -> DateTime<Utc> {
+pub fn floor_to_1min(ts: &DateTime<Utc>) -> DateTime<Utc> {
     ts.with_second(0).unwrap().with_nanosecond(0).unwrap()
+}
+
+pub fn floor_to_5min(dt: &DateTime<Utc>) -> DateTime<Utc> {
+    let ts = dt.timestamp();
+    Utc.timestamp_opt(ts - (ts % 300), 0).single().unwrap()
 }

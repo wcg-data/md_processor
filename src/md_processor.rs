@@ -21,7 +21,7 @@ fn main() {
             eprintln!("共享内存映射失败: {}", e);
             return;
         }
-    };
+    }; 
 
     if !ring_buffer.is_initialized.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("警告：共享内存未初始化");

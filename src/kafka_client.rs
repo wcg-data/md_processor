@@ -1,6 +1,6 @@
 use rdkafka::{ClientConfig, producer::{BaseProducer, BaseRecord}};
 // use rdkafka::error::KafkaError;
-use crate::md_structures::Bar1Min;
+use crate::md_structures::BarData;
 use std::sync::Arc;
 use once_cell::sync::Lazy;
 
@@ -25,9 +25,9 @@ pub fn send_message(producer: &BaseProducer, topic: &str, key: &str, message: &s
     // let _ = producer.flush(Duration::from_secs(1));
 }
 
-pub fn send_bar_1min(bar: &Bar1Min) {
+pub fn send_bar_data(bar: &BarData, freq: &str) {
     let producer = KAFKA_PRODUCER.clone();
-    let topic = format!("bar_1min_{}", bar.contract.trim());
+    let topic = format!("bar_{}_{}", freq, bar.contract.trim());
     let message = bar.build_json_message(); // 或 serde_json::to_string(bar)
     // let message = self.build_csv_message();
 

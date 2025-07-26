@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use chrono::{Timelike, Local};
 use crate::ring_buffer::SharedRingBuffer;
-use crate::bar_aggregator::BarAggregator;
+use crate::bar1min_aggregator::{Bar1MinAggregator};
+use crate::bar5min_aggregator::{Bar5MinAggregator};
 use crate::aggregator_manager::AggregatorManager;
 
 use crate::kafka_client;
@@ -52,7 +53,7 @@ fn single_contract_loop(
     running: &Arc<AtomicBool>,
     contracts_filter: HashSet<String>,
 ) {
-    let mut aggregator = BarAggregator::new();
+    let mut aggregator = Bar1MinAggregator::new();
 
     while running.load(Ordering::SeqCst) {
         match ring_buffer.pop_market_data() {
@@ -65,7 +66,7 @@ fn single_contract_loop(
                     if let Some(bar) = aggregator.on_tick(&tick) {
                         // bar.print();
                         // bar.send_to_kafka();
-                        kafka_client::send_bar_1min(&bar);
+                        kafka_client::send_bar_data(&bar, "1min");
                     }
                 }
             }
@@ -77,7 +78,7 @@ fn single_contract_loop(
     if let Some(bar) = aggregator.flush() {
         // bar.print();
         // bar.send_to_kafka();
-        kafka_client::send_bar_1min(&bar);
+        kafka_client::send_bar_data(&bar, "1min");
     }
 }
 
@@ -88,32 +89,48 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
 
     while running.load(Ordering::SeqCst) {
         let now_minute = Local::now().minute();
+
+        // ---------------- 每分钟触发 ----------------
         if now_minute != last_minute {
             last_minute = now_minute;
-            for bar in manager.flush_all_active() {
-                println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-                // bar.print();
-                kafka_client::send_bar_1min(&bar);
+
+            // ① flush 1 min bar（活跃合约）
+            for bar1min in manager.flush_all_bar1min_active() {
+                kafka_client::send_bar_data(&bar1min, "1min");
+
+                // ② 把 1 min 喂入 5 min 聚合器
+                if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
+                    kafka_client::send_bar_data(&bar5min, "5min");
+                }
             }
         }
-    
+
+        // ---------------- Tick 驱动 ----------------
         if let Some(tick) = ring_buffer.pop_market_data() {
-            if let Some(bar) = manager.on_tick(&tick) {
-                println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-                // bar.print();
-                kafka_client::send_bar_1min(&bar);
+            // ③ Tick → 1 min
+            if let Some(bar1min) = manager.on_tick(&tick) {
+                kafka_client::send_bar_data(&bar1min, "1min");
+
+                // ④ 及时投喂 5 min 聚合器
+                if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
+                    kafka_client::send_bar_data(&bar5min, "5min");
+                }
             }
         } else {
             thread::sleep(Duration::from_millis(5));
         }
     }
-    
 
-    // 程序退出前 flush 最后一批
-    for bar in manager.flush_all_active() {
-        println!("当前时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S.%3f"));
-        // bar.print();
-        kafka_client::send_bar_1min(&bar);
+    // ---------- 程序退出前：flush 最后一批 ----------
+    for bar1min in manager.flush_all_bar1min_active() {
+        kafka_client::send_bar_data(&bar1min, "1min");
+        if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
+            kafka_client::send_bar_data(&bar5min, "5min");
+        }
+    }
+
+    // 最后确保剩余 5 min bar 也 flush
+    for bar5min in manager.flush_all_bar5min_active() {
+        kafka_client::send_bar_data(&bar5min, "5min");
     }
 }
-

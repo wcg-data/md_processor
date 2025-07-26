@@ -59,7 +59,7 @@ impl TickData {
 // BarData, 纯Rust结构体
 // #[derive(Debug, Clone)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bar1Min {
+pub struct BarData {
     pub contract: String,         // 合约代码，如 "cu2505"
     pub contract_yymm: String,    // 合约年月，如 "2505"
     pub comd: String,             // 品种，如 "cu"
@@ -88,7 +88,7 @@ pub struct Bar1Min {
     pub maturity_day: i16,
 }
 
-impl Bar1Min {
+impl BarData {
 
     pub fn build_csv_message(&self) -> String {
         format!(
@@ -154,12 +154,12 @@ impl Bar1Min {
 }
 
 
-//=======================================定义兼容C结构体的Bar1Min===================================
+//=======================================定义兼容C结构体的BarData===================================
 
 // /// 分钟K线Bar结构，兼容C结构体
 // #[repr(C)]
 // #[derive(Debug, Clone, Copy)]
-// pub struct Bar1Min {
+// pub struct BarData {
 //     pub contract: [c_char; 9],          // 合约代码
 //     pub contract_yymm: [c_char; 5],     // 合约年月
 //     pub comd: [c_char; 4],              // 品种代码
@@ -185,7 +185,7 @@ impl Bar1Min {
 //     pub maturity_day: i16,              // 距离到期月份第一天的天数
 // }
 
-// impl Bar1Min {
+// impl BarData {
 //     /// 打印分钟K线数据
 //     ///
 //     /// Args:

@@ -22,7 +22,7 @@ fn main() {
 //     let producer = create_kafka_producer("localhost:9092")?; // 换成你的broker地址
 
 //     // 构造样例数据
-//     let bar = Bar1Min {
+//     let bar = BarData {
 //         contract: "cu2505".into(),
 //         contract_yymm: "2505".into(),
 //         comd: "cu".into(),
