@@ -26,6 +26,31 @@ pub struct TickData {
     pub mid_price: f64,
 }
 
+impl Default for TickData {
+    fn default() -> Self {
+        Self {
+            contract: [0; 9],
+            comd: [0; 4],
+            exchange: [0; 7],
+            date: [0; 11],
+            trade_time: [0; 24], 
+            open: 0.0,
+            high: 0.0,
+            low: 0.0,
+            close: 0.0,
+            pre_settle: 0.0,
+            volume: 0,
+            turnover: 0.0,
+            open_interest: 0,
+            bid_price_1: 0.0,
+            bid_volume_1: 0,
+            ask_price_1: 0.0,
+            ask_volume_1: 0,
+            mid_price: 0.0,
+        }
+    }
+}
+
 impl TickData {
     /// 打印行情快照
     ///
@@ -71,6 +96,7 @@ pub struct BarData {
     pub high: f64,
     pub low: f64,
     pub close: f64,
+    pub prev_close: f64,
     pub pre_settle: f64,
 
     pub volume: u32,
@@ -92,7 +118,7 @@ impl BarData {
 
     pub fn build_csv_message(&self) -> String {
         format!(
-            "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5},{:.5}",
+            "{},{:04},{},{},{},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{},{:.5},{:.5},{},{:.5},{},{:.5},{},{:.5},{:.5},{:.5}",
             self.contract,
             self.contract_yymm,
             self.comd,
@@ -102,6 +128,7 @@ impl BarData {
             self.high,
             self.low,
             self.close,
+            self.prev_close,
             self.pre_settle,
             self.volume,
             self.turnover,
@@ -127,6 +154,7 @@ impl BarData {
             "high": self.high,
             "low": self.low,
             "close": self.close,
+            "prev_close": self.prev_close,
             "pre_settle": self.pre_settle,
             "volume": self.volume,
             "turnover": self.turnover,

@@ -1,4 +1,4 @@
-// bar_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
+// bar1min_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
 /// bar聚合器
 
 use chrono::{DateTime, NaiveDateTime, TimeZone,Utc,FixedOffset};
@@ -69,6 +69,7 @@ impl Bar1MinAggregator {
                     high: prev_last_tick.close,
                     low: prev_last_tick.close,
                     close: prev_last_tick.close,
+                    prev_close: prev_last_tick.close,
                     pre_settle: prev_last_tick.pre_settle,
                     volume: 0,
                     turnover: 0.0,
@@ -126,6 +127,7 @@ impl Bar1MinAggregator {
             high: self.high.unwrap_or(last_tick.close),
             low: self.low.unwrap_or(last_tick.close),
             close: last_tick.close,
+            prev_close: prev_last_tick.close,
             pre_settle: last_tick.pre_settle,
             volume,
             turnover,
@@ -153,8 +155,8 @@ impl Bar1MinAggregator {
         Some(bar)
     }
 
-    /// 验证 Tick 数据是否有效
-    /// 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
+    // / 验证 Tick 数据是否有效
+    // / 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
     pub fn validate_tick(tick: &TickData) -> bool {
         // ---------- 基本数值校验 ----------
         // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
@@ -200,16 +202,16 @@ impl Bar1MinAggregator {
         // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
         let eps = 1e-6; // 容差，避免浮点误差带来的误判
 
-        if tick.volume > 0
-            && tick.turnover.is_finite()
-            && tick.low.is_finite()
-            && tick.high.is_finite()
-        {
-            let avg_price = tick.turnover / tick.volume as f64;
-            if avg_price < tick.low - eps || avg_price > tick.high + eps {
-                return false;
-            }
-        }
+        // if tick.volume > 0
+        //     && tick.turnover.is_finite()
+        //     && tick.low.is_finite()
+        //     && tick.high.is_finite()
+        // {
+        //     let avg_price = tick.turnover / tick.volume as f64;
+        //     if avg_price < tick.low - eps || avg_price > tick.high + eps {
+        //         return false;
+        //     }
+        // }
 
         // ---------- 时段合法性校验 ----------
         // 从 tick 中提取 datetime（自定义解析函数）
@@ -225,6 +227,118 @@ impl Bar1MinAggregator {
         // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
         TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
     }
+
+    // pub fn validate_tick(tick: &TickData) -> bool {
+    //     let tag = format!(
+    //         "{} {}",
+    //         String::from_utf8_lossy(&tick.contract),
+    //         String::from_utf8_lossy(&tick.trade_time)
+    //     );
+
+    //     if tick.open <= 0.0 {
+    //         println!("[{}] invalid open: {}", tag, tick.open);
+    //         return false;
+    //     }
+    //     if tick.high <= 0.0 {
+    //         println!("[{}] invalid high: {}", tag, tick.high);
+    //         return false;
+    //     }
+    //     if tick.low <= 0.0 {
+    //         println!("[{}] invalid low: {}", tag, tick.low);
+    //         return false;
+    //     }
+    //     if !tick.close.is_finite() || tick.close <= 0.0 {
+    //         println!("[{}] invalid close: {}", tag, tick.close);
+    //         return false;
+    //     }
+    //     if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 {
+    //         println!("[{}] invalid pre_settle: {}", tag, tick.pre_settle);
+    //         return false;
+    //     }
+    //     if tick.turnover < 0.0 {
+    //         println!("[{}] negative turnover: {}", tag, tick.turnover);
+    //         return false;
+    //     }
+    //     if tick.bid_price_1 <= 0.0 {
+    //         println!("[{}] invalid bid_price_1: {}", tag, tick.bid_price_1);
+    //         return false;
+    //     }
+    //     if tick.ask_price_1 <= 0.0 {
+    //         println!("[{}] invalid ask_price_1: {}", tag, tick.ask_price_1);
+    //         return false;
+    //     }
+    //     if tick.bid_price_1 > tick.ask_price_1 {
+    //         println!(
+    //             "[{}] bid_price_1 > ask_price_1: {} > {}",
+    //             tag, tick.bid_price_1, tick.ask_price_1
+    //         );
+    //         return false;
+    //     }
+    //     if tick.high < tick.low {
+    //         println!(
+    //             "[{}] high < low: {} < {}",
+    //             tag, tick.high, tick.low
+    //         );
+    //         return false;
+    //     }
+    //     if tick.open < tick.low || tick.open > tick.high {
+    //         println!(
+    //             "[{}] open not in [low, high]: {} not in [{}, {}]",
+    //             tag, tick.open, tick.low, tick.high
+    //         );
+    //         return false;
+    //     }
+    //     if tick.close < tick.low || tick.close > tick.high {
+    //         println!(
+    //             "[{}] close not in [low, high]: {} not in [{}, {}]",
+    //             tag, tick.close, tick.low, tick.high
+    //         );
+    //         return false;
+    //     }
+
+    //     if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+    //         || (tick.volume > 0 && tick.turnover > 0.0))
+    //     {
+    //         println!(
+    //             "[{}] volume/turnover mismatch: volume = {}, turnover = {}",
+    //             tag, tick.volume, tick.turnover
+    //         );
+    //         return false;
+    //     }
+
+    //     let eps = 1e-6;
+    //     if tick.volume > 0
+    //         && tick.turnover.is_finite()
+    //         && tick.low.is_finite()
+    //         && tick.high.is_finite()
+    //     {
+    //         let avg_price = tick.turnover / tick.volume as f64;
+    //         if avg_price < tick.low - eps || avg_price > tick.high + eps {
+    //             println!(
+    //                 "[{}] avg_price = {:.3}, expected in [{:.3}, {:.3}]",
+    //                 tag, avg_price, tick.low - eps, tick.high + eps
+    //             );
+    //             return false;
+    //         }
+    //     }
+
+    //     let dt = match Self::parse_datetime_from_tick(tick) {
+    //         Some(t) => t,
+    //         None => {
+    //             println!("[{}] failed to parse datetime", tag);
+    //             return false;
+    //         }
+    //     };
+    //     let time = dt.time();
+    //     let comd = to_string_field(&tick.comd);
+
+    //     if !TRADE_SESSION_MAP.is_in_trading_session(&comd, time) {
+    //         println!("[{}] not in trading session: {}", tag, time);
+    //         return false;
+    //     }
+
+    //     true
+    // }
 
     // ======== 内部函数 ========
 

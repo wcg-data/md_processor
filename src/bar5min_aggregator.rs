@@ -1,3 +1,6 @@
+// bar5min_aggregator.rs - 优化版本：仅实时更新 high/low，其他字段在 flush 时生成
+/// bar聚合器
+
 use crate::{BarData};
 use chrono::{DateTime, Utc};
   // 引入 TimeZone trait，才能调用 timestamp_opt / from_utc_datetime
@@ -11,7 +14,7 @@ pub struct Bar5MinAggregator {
     /// 窗口最后一条 1 min，用于 close、盘口、OI diff
     pub last_bar: Option<BarData>,
     /// 上一个窗口最后一条 1 min，用于 open、pre_settle、OI diff
-    pub pre_last_bar: Option<BarData>,
+    pub prev_last_bar: Option<BarData>,
     pub open: f64,
     pub high: f64,
     pub low: f64,
@@ -49,7 +52,7 @@ impl Bar5MinAggregator {
     }
     /// 强制 flush（如收盘或程序退出时调用）
     pub fn flush(&mut self) -> Option<BarData> {
-        let pre_last_bar = self.pre_last_bar.as_ref()?;
+        let prev_last_bar = self.prev_last_bar.as_ref()?;
         let last_bar  = self.last_bar.as_ref()?;
 
         let trade_time = self
@@ -62,28 +65,29 @@ impl Bar5MinAggregator {
 
         // 生成 5 min Bar
         let bar5 = BarData {
-            contract:        pre_last_bar.contract.clone(),
-            contract_yymm:   pre_last_bar.contract_yymm.clone(),
-            comd:            pre_last_bar.comd.clone(),
-            exchange:        pre_last_bar.exchange.clone(),
-            date:            pre_last_bar.date.clone(),
+            contract:        prev_last_bar.contract.clone(),
+            contract_yymm:   prev_last_bar.contract_yymm.clone(),
+            comd:            prev_last_bar.comd.clone(),
+            exchange:        prev_last_bar.exchange.clone(),
+            date:            prev_last_bar.date.clone(),
             trade_time,
             open:            self.open,
             high:            self.high,
             low:             self.low,
             close:           last_bar.close,
-            pre_settle:      pre_last_bar.pre_settle,
+            prev_close:      prev_last_bar.close,
+            pre_settle:      prev_last_bar.pre_settle,
             volume,
             turnover,
             open_interest:   last_bar.open_interest,
-            open_interest_diff: (last_bar.open_interest as i64 - pre_last_bar.open_interest as i64) as i32,
+            open_interest_diff: (last_bar.open_interest as i64 - prev_last_bar.open_interest as i64) as i32,
             bid_price_1:     last_bar.bid_price_1,
             bid_volume_1:    last_bar.bid_volume_1,
             ask_price_1:     last_bar.ask_price_1,
             ask_volume_1:    last_bar.ask_volume_1,
             mid_price:       last_bar.mid_price,
             vwap:            if volume == 0 { 0.0 } else { turnover / volume as f64 },
-            log_return:      if pre_last_bar.open > 0.0 { (last_bar.close / pre_last_bar.close).ln() } else { f64::NAN },
+            log_return:      if prev_last_bar.open > 0.0 { (last_bar.close / prev_last_bar.close).ln() } else { f64::NAN },
             maturity_month:  0,
             maturity_day:    0,
         };
@@ -98,7 +102,7 @@ impl Bar5MinAggregator {
     /// 初始化新窗口
     fn init_bar_window(&mut self, floor_time: DateTime<Utc>, bar: &BarData) {
         self.current_bar_minute = Some(floor_time);
-        self.pre_last_bar = None;
+        self.prev_last_bar = None;
         self.last_bar  = Some(bar.clone());
         self.open = bar.open;
         self.high = bar.high;
@@ -111,8 +115,8 @@ impl Bar5MinAggregator {
     /// 增量更新窗口统计
     fn update_state(&mut self, bar: &BarData) {
         // 记录首条
-        if self.pre_last_bar.is_none() {
-            self.pre_last_bar = Some(bar.clone());
+        if self.prev_last_bar.is_none() {
+            self.prev_last_bar = Some(bar.clone());
             self.open = bar.open;
             self.high = bar.high;
             self.low  = bar.low;
