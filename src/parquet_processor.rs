@@ -1,17 +1,15 @@
 // src/parquet_processor.rs
 
 use std::path::{Path, PathBuf};
-use chrono::NaiveDateTime;
-use chrono::NaiveDate;
-use std::fs::File;
 use std::fs;
+use chrono::{NaiveDateTime, NaiveDate, Datelike};
+use std::fs::File;
 use polars::prelude::*;
-use anyhow::Result;
-use rayon::prelude::*; // 这是 rayon 提供并发迭代最重要的一行
+use rayon::prelude::*;
 
 
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
-use md_processor::md_structures::{TickData, BarData};
+use md_processor::md_structures::TickData;
 
 
 fn str_to_fixed<const N: usize>(s: &str) -> [u8; N] {
@@ -55,8 +53,23 @@ pub fn process_parquet<P: AsRef<Path>>(parquet_path: P,  output_parquet_path: P)
         let get_datetime_string = |idx| match &row.0[idx] {
             AnyValue::String(s) => s.to_string(),
             AnyValue::Datetime(v, _, _) => {
-                // 毫秒时间戳 -> 字符串
-                let naive = NaiveDateTime::from_timestamp_millis(*v).unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0));
+                // 自动检测时间戳单位并转换
+                let naive = if *v > 1e15 as i64 {
+                    // 微秒级时间戳 (> 1e15)
+                    NaiveDateTime::from_timestamp_micros(*v)
+                        .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                } else {
+                    // 毫秒级时间戳 (< 1e15)  
+                    NaiveDateTime::from_timestamp_millis(*v)
+                        .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                };
+                
+                // 验证年份合理性
+                let year = naive.year();
+                if year < 2000 || year > 2030 {
+                    eprintln!("警告: 检测到异常年份 {}, 原始时间戳: {}", year, *v);
+                }
+                
                 naive.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
             },
             AnyValue::Date(days) => {
@@ -155,19 +168,28 @@ pub fn process_parquet<P: AsRef<Path>>(parquet_path: P,  output_parquet_path: P)
 
 // // 单文件处理
 // fn main() -> anyhow::Result<()> {
-//     let parquet_file = "/root/data/future_data/huatai_data/full_tick/al2510.parquet";
-//     let output_parquet_path = "/root/data/future_data/huatai_data/full_bar_1min/al2510_1min.parquet";
+//     let data_source = "dongzheng_data";
+//     let contract = "cu2110";
+
+//     let parquet_file = format!("/root/data/future_data/{}/full_tick/{}.parquet", data_source, contract);
+//     let output_parquet_path = format!("/root/data/future_data/{}/full_bar_1min/{}_1min.parquet",data_source, contract);
 
 //     process_parquet(parquet_file, output_parquet_path)?;
 //     Ok(())
 // }
 
 
-fn main() -> Result<()> {
-    let input_dir = Path::new("/root/data/future_data/huatai_data/full_tick");
-    let output_dir = Path::new("/root/data/future_data/huatai_data/full_bar_1min");
+fn main() -> anyhow::Result<()> {
+    let input_dir = Path::new("/root/data/future_data/dongzheng_data/full_tick");
+    let output_dir = Path::new("/root/data/future_data/dongzheng_data/full_bar_1min");
+    // let input_dir = Path::new("/root/data/future_data/huatai_data/full_tick");
+    // let output_dir = Path::new("/root/data/future_data/huatai_data/full_bar_1min");
     fs::create_dir_all(output_dir)?;
-    rayon::ThreadPoolBuilder::new().num_threads(8).build_global().unwrap();
+    rayon::ThreadPoolBuilder::new()
+    .num_threads(8)
+    .stack_size(32 * 1024 * 1024) // ← 新增：把每个 worker 的栈调到 32MB
+    .build_global()
+    .unwrap();
 
     // 1. 收集所有 parquet 文件
     let files: Vec<PathBuf> = fs::read_dir(input_dir)?

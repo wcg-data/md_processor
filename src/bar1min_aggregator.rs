@@ -116,6 +116,22 @@ impl Bar1MinAggregator {
             std::f64::NAN
         };
 
+        // 验证volume和turnover的一致性：要么都为0，要么都大于0
+        if !((volume == 0 && turnover == 0.0) || (volume > 0 && turnover > 0.0)) {
+            println!(
+                "警告: 丢弃volume和turnover不一致的bar, volume={}, turnover={}, contract={}, time={}",
+                volume, turnover, to_string_field(&last_tick.contract), trade_time
+            );
+            // 清空状态
+            self.current_bar_minute = None;
+            self.prev_last_tick = self.last_tick;
+            self.last_tick = None;
+            self.open = None;
+            self.high = None;
+            self.low = None;
+            return None;
+        }
+
         let bar = BarData {
             contract: contract.clone(),
             contract_yymm: extract_contract_yymm(&contract, &date),
@@ -159,186 +175,186 @@ impl Bar1MinAggregator {
     // / 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
     pub fn validate_tick(tick: &TickData) -> bool {
         // ---------- 基本数值校验 ----------
-        // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
-        if tick.open <= 0.0 { return false; }
-        if tick.high <= 0.0 { return false; }
-        if tick.low <= 0.0 { return false; }
-        if !tick.close.is_finite() || tick.close <= 0.0 { return false; }
-
-        // 昨日结算价需有效且大于0（用于涨跌停等校验）
-        if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
-
-        // 成交额不能为负（允许为 0）
-        if tick.turnover < 0.0 { return false; }
-
-        // 买卖一价必须大于 0
-        if tick.bid_price_1 <= 0.0 { return false; }
-        if tick.ask_price_1 <= 0.0 { return false; }
-
-        // 买一价不能大于卖一价（防止撮合错误）
-        if tick.bid_price_1 > tick.ask_price_1 { return false; }
-
-        // ---------- 合理价格区间校验 ----------
-        // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系
-        if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
-            if tick.high < tick.low { return false; }              // high 必须 ≥ low
-            if tick.open < tick.low || tick.open > tick.high {     // open 必须在区间内
-                return false;
-            }
-            if tick.close < tick.low || tick.close > tick.high {   // close 必须在区间内
-                return false;
-            }
-        }
-
-        // ---------- 成交量与成交额的一致性校验 ----------
-        // 要求：
-        // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
-        // - volume > 0 时，turnover 必须为正
-        if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
-            || (tick.volume > 0 && tick.turnover > 0.0)) {
+        if tick.open <= 0.0 {
+            println!("校验失败: open <= 0, open={}", tick.open);
             return false;
         }
-
-        // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
-        let eps = 1e-6; // 容差，避免浮点误差带来的误判
-
-        // if tick.volume > 0
-        //     && tick.turnover.is_finite()
-        //     && tick.low.is_finite()
-        //     && tick.high.is_finite()
-        // {
-        //     let avg_price = tick.turnover / tick.volume as f64;
-        //     if avg_price < tick.low - eps || avg_price > tick.high + eps {
-        //         return false;
-        //     }
+        if tick.high <= 0.0 {
+            println!("校验失败: high <= 0, high={}", tick.high);
+            return false;
+        }
+        if tick.low <= 0.0 {
+            println!("校验失败: low <= 0, low={}", tick.low);
+            return false;
+        }
+        if !tick.close.is_finite() || tick.close <= 0.0 {
+            println!("校验失败: close 无效或 <= 0, close={}", tick.close);
+            return false;
+        }
+        // if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 {
+        //     println!("校验失败: pre_settle 无效或 <= 0, pre_settle={}", tick.pre_settle);
+        //     return false;
         // }
-
-        // ---------- 时段合法性校验 ----------
-        // 从 tick 中提取 datetime（自定义解析函数）
+        if tick.volume < 0 {
+            println!("校验失败: volume < 0, volume={}", tick.volume);
+            return false;
+        }
+        if tick.turnover < 0.0 {
+            println!("校验失败: turnover < 0, turnover={}", tick.turnover);
+            return false;
+        }
+        if tick.bid_price_1 <= 0.0 {
+            println!("校验失败: bid_price_1 <= 0, bid_price_1={}", tick.bid_price_1);
+            return false;
+        }
+        if tick.ask_price_1 <= 0.0 {
+            println!("校验失败: ask_price_1 <= 0, ask_price_1={}", tick.ask_price_1);
+            return false;
+        }
+        if tick.bid_price_1 > tick.ask_price_1 {
+            println!(
+                "校验失败: bid_price_1 > ask_price_1, bid={}, ask={}",
+                tick.bid_price_1, tick.ask_price_1
+            );
+            return false;
+        }
+    
+        // ---------- 合理价格区间校验 ----------
+        if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
+            if tick.high < tick.low {
+                println!(
+                    "校验失败: high < low, high={}, low={}",
+                    tick.high, tick.low
+                );
+                return false;
+            }
+            if tick.open < tick.low || tick.open > tick.high {
+                println!(
+                    "校验失败: open 不在 [low, high] 区间内, open={}, low={}, high={}",
+                    tick.open, tick.low, tick.high
+                );
+                return false;
+            }
+            if tick.close < tick.low || tick.close > tick.high {
+                println!(
+                    "校验失败: close 不在 [low, high] 区间内, close={}, low={}, high={}",
+                    tick.close, tick.low, tick.high
+                );
+                return false;
+            }
+        }
+    
+        // ---------- 成交均价合理性 ----------
+        let eps = 1e-6;
+        if tick.volume > 0
+            && tick.turnover.is_finite()
+            && tick.low.is_finite()
+            && tick.high.is_finite()
+        {
+            let avg_price = tick.turnover / tick.volume as f64;
+            if avg_price < tick.low - eps || avg_price > tick.high + eps {
+                println!(
+                    "校验失败: avg_price 不在 [low-eps, high+eps] 区间内, avg_price={}, low={}, high={}",
+                    avg_price, tick.low, tick.high
+                );
+                return false;
+            }
+        }
+    
+        // ---------- 时间合法性 ----------
         let dt = match Self::parse_datetime_from_tick(tick) {
             Some(t) => t,
-            None => return false, // 若无法解析时间戳，判为无效
+            None => {
+                println!("校验失败: 时间解析失败");
+                return false;
+            }
         };
-
-        // 获取时间部分（NaiveTime）用于交易时段判断
+    
         let time = dt.time();
-        let comd = to_string_field(&tick.comd); // 提取合约标识
-
-        // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
-        TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
+        let comd = to_string_field(&tick.comd);
+    
+        if !TRADE_SESSION_MAP.is_in_trading_session(&comd, time) {
+            println!(
+                "校验失败: 不在交易时间段内, comd={}, time={}",
+                comd, time
+            );
+            return false;
+        }
+    
+        true
     }
-
+    
     // pub fn validate_tick(tick: &TickData) -> bool {
-    //     let tag = format!(
-    //         "{} {}",
-    //         String::from_utf8_lossy(&tick.contract),
-    //         String::from_utf8_lossy(&tick.trade_time)
-    //     );
+    //     // ---------- 基本数值校验 ----------
+    //     // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
+    //     if tick.open <= 0.0 { return false; }
+    //     if tick.high <= 0.0 { return false; }
+    //     if tick.low <= 0.0 { return false; }
+    //     if !tick.close.is_finite() || tick.close <= 0.0 { return false; }
 
-    //     if tick.open <= 0.0 {
-    //         println!("[{}] invalid open: {}", tag, tick.open);
-    //         return false;
-    //     }
-    //     if tick.high <= 0.0 {
-    //         println!("[{}] invalid high: {}", tag, tick.high);
-    //         return false;
-    //     }
-    //     if tick.low <= 0.0 {
-    //         println!("[{}] invalid low: {}", tag, tick.low);
-    //         return false;
-    //     }
-    //     if !tick.close.is_finite() || tick.close <= 0.0 {
-    //         println!("[{}] invalid close: {}", tag, tick.close);
-    //         return false;
-    //     }
-    //     if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 {
-    //         println!("[{}] invalid pre_settle: {}", tag, tick.pre_settle);
-    //         return false;
-    //     }
-    //     if tick.turnover < 0.0 {
-    //         println!("[{}] negative turnover: {}", tag, tick.turnover);
-    //         return false;
-    //     }
-    //     if tick.bid_price_1 <= 0.0 {
-    //         println!("[{}] invalid bid_price_1: {}", tag, tick.bid_price_1);
-    //         return false;
-    //     }
-    //     if tick.ask_price_1 <= 0.0 {
-    //         println!("[{}] invalid ask_price_1: {}", tag, tick.ask_price_1);
-    //         return false;
-    //     }
-    //     if tick.bid_price_1 > tick.ask_price_1 {
-    //         println!(
-    //             "[{}] bid_price_1 > ask_price_1: {} > {}",
-    //             tag, tick.bid_price_1, tick.ask_price_1
-    //         );
-    //         return false;
-    //     }
-    //     if tick.high < tick.low {
-    //         println!(
-    //             "[{}] high < low: {} < {}",
-    //             tag, tick.high, tick.low
-    //         );
-    //         return false;
-    //     }
-    //     if tick.open < tick.low || tick.open > tick.high {
-    //         println!(
-    //             "[{}] open not in [low, high]: {} not in [{}, {}]",
-    //             tag, tick.open, tick.low, tick.high
-    //         );
-    //         return false;
-    //     }
-    //     if tick.close < tick.low || tick.close > tick.high {
-    //         println!(
-    //             "[{}] close not in [low, high]: {} not in [{}, {}]",
-    //             tag, tick.close, tick.low, tick.high
-    //         );
-    //         return false;
-    //     }
+    //     // 昨日结算价需有效且大于0（用于涨跌停等校验）
+    //     if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
 
-    //     if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
-    //         || (tick.volume > 0 && tick.turnover > 0.0))
-    //     {
-    //         println!(
-    //             "[{}] volume/turnover mismatch: volume = {}, turnover = {}",
-    //             tag, tick.volume, tick.turnover
-    //         );
-    //         return false;
-    //     }
+    //     // 成交额不能为负（允许为 0）
+    //     if tick.turnover < 0.0 { return false; }
 
-    //     let eps = 1e-6;
-    //     if tick.volume > 0
-    //         && tick.turnover.is_finite()
-    //         && tick.low.is_finite()
-    //         && tick.high.is_finite()
-    //     {
-    //         let avg_price = tick.turnover / tick.volume as f64;
-    //         if avg_price < tick.low - eps || avg_price > tick.high + eps {
-    //             println!(
-    //                 "[{}] avg_price = {:.3}, expected in [{:.3}, {:.3}]",
-    //                 tag, avg_price, tick.low - eps, tick.high + eps
-    //             );
+    //     // 买卖一价必须大于 0
+    //     if tick.bid_price_1 <= 0.0 { return false; }
+    //     if tick.ask_price_1 <= 0.0 { return false; }
+
+    //     // 买一价不能大于卖一价（防止撮合错误）
+    //     if tick.bid_price_1 > tick.ask_price_1 { return false; }
+
+    //     // ---------- 合理价格区间校验 ----------
+    //     // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系
+    //     if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
+    //         if tick.high < tick.low { return false; }              // high 必须 ≥ low
+    //         if tick.open < tick.low || tick.open > tick.high {     // open 必须在区间内
+    //             return false;
+    //         }
+    //         if tick.close < tick.low || tick.close > tick.high {   // close 必须在区间内
     //             return false;
     //         }
     //     }
 
+    //     // ---------- 成交量与成交额的一致性校验 ----------
+    //     // 要求：
+    //     // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
+    //     // - volume > 0 时，turnover 必须为正
+    //     if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+    //         || (tick.volume > 0 && tick.turnover > 0.0)) {
+    //         return false;
+    //     }
+
+    //     // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
+    //     let eps = 1e-6; // 容差，避免浮点误差带来的误判
+
+    //     // if tick.volume > 0
+    //     //     && tick.turnover.is_finite()
+    //     //     && tick.low.is_finite()
+    //     //     && tick.high.is_finite()
+    //     // {
+    //     //     let avg_price = tick.turnover / tick.volume as f64;
+    //     //     if avg_price < tick.low - eps || avg_price > tick.high + eps {
+    //     //         return false;
+    //     //     }
+    //     // }
+
+    //     // ---------- 时段合法性校验 ----------
+    //     // 从 tick 中提取 datetime（自定义解析函数）
     //     let dt = match Self::parse_datetime_from_tick(tick) {
     //         Some(t) => t,
-    //         None => {
-    //             println!("[{}] failed to parse datetime", tag);
-    //             return false;
-    //         }
+    //         None => return false, // 若无法解析时间戳，判为无效
     //     };
+
+    //     // 获取时间部分（NaiveTime）用于交易时段判断
     //     let time = dt.time();
-    //     let comd = to_string_field(&tick.comd);
+    //     let comd = to_string_field(&tick.comd); // 提取合约标识
 
-    //     if !TRADE_SESSION_MAP.is_in_trading_session(&comd, time) {
-    //         println!("[{}] not in trading session: {}", tag, time);
-    //         return false;
-    //     }
-
-    //     true
+    //     // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+    //     TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
     // }
+
 
     // ======== 内部函数 ========
 
