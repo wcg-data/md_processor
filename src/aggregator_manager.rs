@@ -81,7 +81,7 @@ impl AggregatorManager {
             .entry(bar.contract.clone())
             .or_insert_with(Bar5MinAggregator::new);
 
-        aggr5.on_bar_1min(bar.clone())   // 需要拥有所有权，所以 clone
+        aggr5.on_bar_1min(bar)   // 使用引用，避免克隆
     }
 
     /// flush 产生活跃的 5min bar（内部先 flush 1min）
@@ -95,7 +95,7 @@ impl AggregatorManager {
                 .entry(bar.contract.clone())
                 .or_insert_with(Bar5MinAggregator::new);
 
-            if let Some(b5) = aggr5.on_bar_1min(bar) {
+            if let Some(b5) = aggr5.on_bar_1min(&bar) {
                 bars_5min.push(b5);
             }
         }
