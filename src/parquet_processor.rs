@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
 use md_processor::md_structures::{TickData, BarData};
+use md_processor::common_utils::{extract_contract_yymm, to_string_field};
 
 
 fn str_to_fixed<const N: usize>(s: &str) -> [u8; N] {
@@ -274,6 +275,10 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
             col("close").max().alias("high"),
             col("close").min().alias("low"),
             col("close").last().alias("close"),
+            
+            // Volume和Turnover增量计算（最后tick减去第一tick）
+            (col("volume").last() - col("volume").first()).alias("volume_diff"),
+            (col("turnover").last() - col("turnover").first()).alias("turnover_diff"),
         ])
         .sort(["minute_window"], SortMultipleOptions::default())
         .collect()?;
@@ -291,34 +296,74 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
         let last_tick = extract_tick_from_grouped_row(&grouped_df, i, "last")?;
         
         
-        // 直接从聚合结果获取OHLC（已由Polars向量化计算）
+        // 直接从聚合结果获取OHLC和Volume数据（已由Polars向量化计算）
         let open = grouped_df.column("open")?.f64()?.get(i).unwrap_or(0.0);
         let high = grouped_df.column("high")?.f64()?.get(i).unwrap_or(0.0);
         let low = grouped_df.column("low")?.f64()?.get(i).unwrap_or(0.0);
+        let close = grouped_df.column("close")?.f64()?.get(i).unwrap_or(0.0);
+        
+        // 获取volume和turnover增量
+        let volume_diff = grouped_df.column("volume_diff")?.f64()?.get(i).unwrap_or(0.0);
+        let turnover_diff = grouped_df.column("turnover_diff")?.f64()?.get(i).unwrap_or(0.0);
         
         // 解析时间窗口
         let minute_str = grouped_df.column("minute_window")?.str()?.get(i).unwrap_or("");
-        let minute_window = chrono::NaiveDateTime::parse_from_str(minute_str, "%Y-%m-%d %H:%M:%S")
-            .map(|dt| Utc.from_utc_datetime(&dt))
-            .unwrap_or_else(|_| Utc::now());
-            
-        // 构建一个有效的last_tick，直接使用minute_window作为时间
-        let mut fixed_last_tick = last_tick;
-        fixed_last_tick.trade_time = str_to_fixed::<24>(minute_str);
+        let trade_time = minute_str.to_string();
         
-        // 构建聚合器状态 - 复用flush()业务逻辑
-        let mut aggregator = Bar1MinAggregator::new();
-        aggregator.current_bar_minute = Some(minute_window);
-        aggregator.prev_last_tick = prev_tick;
-        aggregator.last_tick = Some(fixed_last_tick);
-        aggregator.open = Some(open);
-        aggregator.high = Some(high);
-        aggregator.low = Some(low);
-
-        // 使用flush生成最终BarData（保持所有业务逻辑）
-        if let Some(bar) = aggregator.flush() {
-            bars.push(bar);
-        }
+        // 直接构建BarData，不使用aggregator
+        
+        let contract = to_string_field(&last_tick.contract);
+        let comd = to_string_field(&last_tick.comd);
+        let exchange = to_string_field(&last_tick.exchange);
+        let date = to_string_field(&last_tick.date);
+        
+        // 计算 prev_close 和 log_return
+        let prev_close = prev_tick.map(|t| t.close).unwrap_or(last_tick.close);
+        let log_return = if prev_close > 0.0 {
+            (close / prev_close).ln()
+        } else {
+            std::f64::NAN
+        };
+        
+        // 按照正确逻辑计算 open_interest_diff：当前分钟最后tick - 上一分钟最后tick
+        let oi_diff = if let Some(prev_tick) = prev_tick {
+            (last_tick.open_interest as i64 - prev_tick.open_interest as i64) as i32
+        } else {
+            0
+        };
+        
+        let volume = volume_diff.max(0.0) as u32;
+        let turnover = turnover_diff.max(0.0);
+        
+        let bar = BarData {
+            contract: contract.clone(),
+            contract_yymm: extract_contract_yymm(&contract, &date),
+            comd,
+            exchange,
+            date,
+            trade_time,
+            open,
+            high,
+            low,
+            close,
+            prev_close,
+            pre_settle: last_tick.pre_settle,
+            volume,
+            turnover,
+            open_interest: last_tick.open_interest,
+            open_interest_diff: oi_diff,
+            bid_price_1: last_tick.bid_price_1,
+            bid_volume_1: last_tick.bid_volume_1,
+            ask_price_1: last_tick.ask_price_1,
+            ask_volume_1: last_tick.ask_volume_1,
+            mid_price: last_tick.mid_price,
+            vwap: if volume == 0 { 0.0 } else { turnover / volume as f64 },
+            log_return,
+            maturity_month: 0,
+            maturity_day: 0,
+        };
+        
+        bars.push(bar);
         
         prev_tick = Some(last_tick);
         
@@ -352,9 +397,17 @@ fn extract_tick_from_grouped_row(df: &DataFrame, row_idx: usize, prefix: &str) -
     
     let get_u32 = |col_name: &str| -> u32 {
         df.column(&format!("{}_{}", prefix, col_name))
-            .ok().and_then(|col| col.i64().ok())
-            .and_then(|i64_col| i64_col.get(row_idx))
-            .map(|v| v as u32)
+            .ok().and_then(|col| {
+                // 尝试作为f64列读取，然后转换为u32
+                if let Ok(f64_col) = col.f64() {
+                    f64_col.get(row_idx).map(|v| v as u32)
+                } else if let Ok(i64_col) = col.i64() {
+                    // 备选方案：作为i64列读取
+                    i64_col.get(row_idx).map(|v| v as u32)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0)
     };
 
