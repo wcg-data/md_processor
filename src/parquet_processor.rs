@@ -475,90 +475,159 @@ fn write_bars_to_parquet<P: AsRef<Path>>(bars: &[BarData], output_path: P) -> an
     Ok(())
 }
 
-// 单文件处理
-fn main() -> anyhow::Result<()> {
-    let data_source = "dongzheng_data";
-    let contract = "cu2110";
-
-    let parquet_file = format!("/root/data/future_data/{}/full_tick/{}.parquet", data_source, contract);
-    let output_parquet_path = format!("/root/data/future_data/{}/full_bar_1min/{}_1min.parquet",data_source, contract);
-
-    // 使用优化版本
-    process_parquet_optimized(parquet_file, output_parquet_path)?;
-    Ok(())
-}
-
-
+// 单文件处理（已注释，保留用于调试）
 // fn main() -> anyhow::Result<()> {
-//     let input_dir = Path::new("/root/data/future_data/dongzheng_data/full_tick");
-//     let output_dir = Path::new("/root/data/future_data/dongzheng_data/full_bar_1min");
-//     // let input_dir = Path::new("/root/data/future_data/huatai_data/full_tick");
-//     // let output_dir = Path::new("/root/data/future_data/huatai_data/full_bar_1min");
-//     fs::create_dir_all(output_dir)?;
-//     // 优化并发设置：减少线程数，增加栈大小
-//     rayon::ThreadPoolBuilder::new()
-//     .num_threads(6)  // 降低线程数从16到6，减少内存压力
-//     .stack_size(64 * 1024 * 1024) // 增加栈大小到64MB
-//     .build_global()
-//     .unwrap();
+//     let data_source = "dongzheng_data";
+//     let contract = "cu2110";
 
-//     // 1. 收集所有 parquet 文件（排除已知损坏的文件）
-//     let mut files: Vec<PathBuf> = fs::read_dir(input_dir)?
-//         .filter_map(Result::ok)
-//         .map(|entry| entry.path())
-//         .filter(|p| p.extension().map(|ext| ext == "parquet").unwrap_or(false))
-//         .filter(|p| {
-//             // 跳过已知损坏的文件
-//             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-//             !["pp1609.parquet", "ad2606.parquet", "eg2107.parquet"].contains(&name)
-//         })
-//         .collect();
-    
-//     // 按文件名排序以确保处理顺序一致
-//     files.sort();
-    
-//     let total_files = files.len();
-//     println!("发现 {} 个有效的 parquet 文件，开始处理...", total_files);
-    
-//     // 2. 添加进度统计
-//     let processed_count = Arc::new(AtomicUsize::new(0));
-//     let success_count = Arc::new(AtomicUsize::new(0));
-//     let failed_count = Arc::new(AtomicUsize::new(0));
-    
-//     // 3. rayon 并发处理每个文件
-//     files.par_iter().for_each(|input_path| {
-//         let file_name = input_path.file_stem().unwrap().to_string_lossy();
-//         let output_path = output_dir.join(format!("{}_1min.parquet", file_name));
+//     let parquet_file = format!("/root/data/future_data/{}/full_tick/{}.parquet", data_source, contract);
+//     let output_parquet_path = format!("/root/data/future_data/{}/full_bar_1min/{}_1min.parquet",data_source, contract);
 
-//         match process_parquet(input_path, &output_path) {
-//             Ok(_) => {
-//                 success_count.fetch_add(1, Ordering::Relaxed);
-//                 let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-//                 if current % 100 == 0 || current == total_files {
-//                     println!("✅ 进度: {}/{} ({:.1}%) - 成功: {}, 失败: {}", 
-//                         current, total_files, 
-//                         (current as f64 / total_files as f64) * 100.0,
-//                         success_count.load(Ordering::Relaxed),
-//                         failed_count.load(Ordering::Relaxed)
-//                     );
-//                 }
-//             },
-//             Err(e) => {
-//                 failed_count.fetch_add(1, Ordering::Relaxed);
-//                 let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-//                 eprintln!("❌ 处理失败 ({}/{}): {:?}, 错误: {:?}", 
-//                     current, total_files, input_path, e);
-//             }
-//         }
-//     });
-    
-//     // 4. 输出最终统计
-//     let final_success = success_count.load(Ordering::Relaxed);
-//     let final_failed = failed_count.load(Ordering::Relaxed);
-//     println!("\n=== 处理完成统计 ===");
-//     println!("总文件数: {}", total_files);
-//     println!("成功处理: {} ({:.1}%)", final_success, (final_success as f64 / total_files as f64) * 100.0);
-//     println!("处理失败: {} ({:.1}%)", final_failed, (final_failed as f64 / total_files as f64) * 100.0);
-
+//     // 使用优化版本
+//     process_parquet_optimized(parquet_file, output_parquet_path)?;
 //     Ok(())
 // }
+
+// 批量并行处理主函数
+fn main() -> anyhow::Result<()> {
+    use std::env;
+    use std::path::PathBuf;
+    use std::fs;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    
+    // 从命令行参数获取数据源，默认为 dongzheng_data
+    let args: Vec<String> = env::args().collect();
+    let data_source = if args.len() > 1 {
+        &args[1]
+    } else {
+        "dongzheng_data"
+    };
+    
+    let input_dir = Path::new("/root/data/future_data").join(data_source).join("full_tick");
+    let output_dir = Path::new("/root/data/future_data").join(data_source).join("full_bar_1min");
+    
+    if !input_dir.exists() {
+        eprintln!("输入目录不存在: {:?}", input_dir);
+        return Ok(());
+    }
+    
+    fs::create_dir_all(&output_dir)?;
+    
+    println!("=== Parquet 批量处理器 ===");
+    println!("数据源: {}", data_source);
+    println!("输入目录: {:?}", input_dir);
+    println!("输出目录: {:?}", output_dir);
+    println!();
+    
+    // 优化并发设置：根据CPU核心数动态调整
+    let num_cpus = num_cpus::get();
+    let num_threads = (num_cpus / 2).max(2).min(8); // 使用一半CPU，最少2个，最多8个
+    
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .stack_size(64 * 1024 * 1024) // 64MB栈大小
+        .build_global()
+        .unwrap();
+    
+    println!("使用 {} 个线程进行并行处理", num_threads);
+    
+    // 1. 收集所有 parquet 文件
+    let mut files: Vec<PathBuf> = fs::read_dir(&input_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().map(|ext| ext == "parquet").unwrap_or(false))
+        .filter(|p| {
+            // 跳过已知损坏的文件
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            !["pp1609.parquet", "ad2606.parquet", "eg2107.parquet"].contains(&name)
+        })
+        .collect();
+    
+    // 按文件名排序
+    files.sort();
+    
+    let total_files = files.len();
+    if total_files == 0 {
+        println!("未找到有效的 parquet 文件");
+        return Ok(());
+    }
+    
+    println!("发现 {} 个有效的 parquet 文件", total_files);
+    println!("开始处理...\n");
+    
+    // 2. 进度统计
+    let processed_count = Arc::new(AtomicUsize::new(0));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let failed_count = Arc::new(AtomicUsize::new(0));
+    let skipped_count = Arc::new(AtomicUsize::new(0));
+    
+    let start_time = std::time::Instant::now();
+    
+    // 3. 并行处理每个文件
+    files.par_iter().for_each(|input_path| {
+        let file_name = input_path.file_stem().unwrap().to_string_lossy();
+        let output_path = output_dir.join(format!("{}_1min.parquet", file_name));
+        
+        // 如果输出文件已存在，跳过处理
+        if output_path.exists() {
+            skipped_count.fetch_add(1, Ordering::Relaxed);
+            let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if current % 10 == 0 || current == total_files {
+                println!("⏭️  跳过已存在 ({}/{}): {}", current, total_files, file_name);
+            }
+            return;
+        }
+        
+        // 使用优化版本处理
+        match process_parquet_optimized(input_path, &output_path) {
+            Ok(_) => {
+                success_count.fetch_add(1, Ordering::Relaxed);
+                let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                
+                // 每处理10个文件或最后一个文件时显示进度
+                if current % 10 == 0 || current == total_files {
+                    let elapsed = start_time.elapsed().as_secs();
+                    let rate = if elapsed > 0 { current as f64 / elapsed as f64 } else { 0.0 };
+                    
+                    println!("✅ 进度: {}/{} ({:.1}%) - 成功: {}, 失败: {}, 跳过: {} - 速度: {:.1} 文件/秒", 
+                        current, total_files, 
+                        (current as f64 / total_files as f64) * 100.0,
+                        success_count.load(Ordering::Relaxed),
+                        failed_count.load(Ordering::Relaxed),
+                        skipped_count.load(Ordering::Relaxed),
+                        rate
+                    );
+                }
+            },
+            Err(e) => {
+                failed_count.fetch_add(1, Ordering::Relaxed);
+                let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("❌ 处理失败 ({}/{}): {}, 错误: {:?}", 
+                    current, total_files, file_name, e);
+            }
+        }
+    });
+    
+    let elapsed = start_time.elapsed();
+    
+    // 4. 输出最终统计
+    let final_success = success_count.load(Ordering::Relaxed);
+    let final_failed = failed_count.load(Ordering::Relaxed);
+    let final_skipped = skipped_count.load(Ordering::Relaxed);
+    
+    println!("\n=== 处理完成统计 ===");
+    println!("总文件数: {}", total_files);
+    println!("成功处理: {} ({:.1}%)", final_success, (final_success as f64 / total_files as f64) * 100.0);
+    println!("处理失败: {} ({:.1}%)", final_failed, (final_failed as f64 / total_files as f64) * 100.0);
+    println!("跳过已存在: {} ({:.1}%)", final_skipped, (final_skipped as f64 / total_files as f64) * 100.0);
+    println!("总耗时: {:.2} 秒", elapsed.as_secs_f64());
+    println!("平均速度: {:.2} 文件/秒", total_files as f64 / elapsed.as_secs_f64());
+    
+    if final_failed > 0 {
+        println!("\n⚠️  有 {} 个文件处理失败，请检查日志", final_failed);
+    }
+
+    Ok(())
+}
