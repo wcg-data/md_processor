@@ -5,6 +5,10 @@ use chrono::{DateTime, NaiveDateTime, TimeZone,Utc,FixedOffset};
 use crate::{TickData, BarData};
 use crate::common_utils::*;
 use crate::trade_session_loader::TRADE_SESSION_MAP;
+use once_cell::sync::Lazy;
+
+// 静态时区对象，避免每次创建
+static UTC_PLUS_8: Lazy<FixedOffset> = Lazy::new(|| FixedOffset::east_opt(8 * 3600).unwrap());
 
 #[derive(Debug, Default)]
 pub struct Bar1MinAggregator {
@@ -14,6 +18,8 @@ pub struct Bar1MinAggregator {
     pub open: Option<f64>,
     pub high: Option<f64>,
     pub low: Option<f64>,
+    // 缓存解析后的时间，避免重复解析
+    cached_tick_time: Option<DateTime<Utc>>,
 }
 
 impl Bar1MinAggregator {
@@ -22,15 +28,30 @@ impl Bar1MinAggregator {
     }
 
     pub fn on_tick(&mut self, tick: &TickData) -> Option<BarData> {
-
+        // 缓存时间解析结果
         let tick_time = Self::parse_datetime_from_tick(tick)?;
+        self.cached_tick_time = Some(tick_time);
         let tick_minute = floor_to_1min(&tick_time);
 
         if let Some(current_bar_minute) = self.current_bar_minute {
             if tick_minute == current_bar_minute {
                 self.last_tick = Some(*tick);
-                self.high = Some(self.high.map_or(tick.close, |h| h.max(tick.close)));
-                self.low = Some(self.low.map_or(tick.close, |l| l.min(tick.close)));
+                // 优化：使用直接比较替代 map_or 闭包调用
+                if let Some(ref mut h) = self.high {
+                    if tick.close > *h {
+                        *h = tick.close;
+                    }
+                } else {
+                    self.high = Some(tick.close);
+                }
+                
+                if let Some(ref mut l) = self.low {
+                    if tick.close < *l {
+                        *l = tick.close;
+                    }
+                } else {
+                    self.low = Some(tick.close);
+                }
                 return None;
             } else {
                 let flushed = self.flush();
@@ -53,7 +74,7 @@ impl Bar1MinAggregator {
                 let date = to_string_field(&prev_last_tick.date);
                 let trade_time = self.current_bar_minute
                     .unwrap_or_else(|| Utc::now())
-                    .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())  // ← 转为 UTC+8
+                    .with_timezone(&*UTC_PLUS_8)  // 使用静态时区对象
                     .format("%Y-%m-%d %H:%M:%S")
                     .to_string();
 
@@ -89,6 +110,7 @@ impl Bar1MinAggregator {
                 self.current_bar_minute = None;
                 self.high = None;
                 self.low = None;
+                self.cached_tick_time = None; // 清空时间缓存
 
                 return Some(bar);
             } else {
@@ -101,7 +123,8 @@ impl Bar1MinAggregator {
         let comd = to_string_field(&last_tick.comd);
         let exchange = to_string_field(&last_tick.exchange);
         let date = to_string_field(&last_tick.date);
-        let parsed_time = Self::parse_datetime_from_tick(&last_tick)?;
+        // 优化：复用缓存的时间，避免重复解析
+        let parsed_time = self.cached_tick_time.or_else(|| Self::parse_datetime_from_tick(&last_tick))?;
         let trade_time = align_to_bar_minute(&parsed_time)
             .format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -155,87 +178,26 @@ impl Bar1MinAggregator {
         self.open = None;
         self.high = None;
         self.low = None;
+        self.cached_tick_time = None; // 清空时间缓存
 
         Some(bar)
     }
-
-    // / 验证 Tick 数据是否有效
-    // / 包括：数值有效性、字段间逻辑关系、成交价区间、成交量成交额匹配、时间合法性等
-    // pub fn validate_tick(tick: &TickData) -> bool {
-    //     // ---------- 基本数值校验 ----------
-    //     // 只检查关键价格字段
-    //     if !tick.close.is_finite() || tick.close <= 0.0 {
-    //         return false;
-    //     }
-        
-    //     // 允许 volume 为 0（某些时段可能无成交）
-    //     if tick.volume < 0 {
-    //         return false;
-    //     }
-        
-    //     // 允许 turnover 为负（可能存在特殊情况）
-    //     if !tick.turnover.is_finite() {
-    //         return false;
-    //     }
-        
-    //     // 放宽买卖价检查 - 允许某个价格为0（可能暂停报价）
-    //     if tick.bid_price_1 < 0.0 || tick.ask_price_1 < 0.0 {
-    //         return false;
-    //     }
-        
-    //     // 只在两个价格都大于0时检查买卖价关系
-    //     if tick.bid_price_1 > 0.0 && tick.ask_price_1 > 0.0 && tick.bid_price_1 > tick.ask_price_1 {
-    //         return false;
-    //     }
     
-    //     // ---------- 简化价格区间校验 ----------
-    //     // 只检查最基本的逻辑关系
-    //     if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
-    //         if tick.high < tick.low {
-    //             return false;
-    //         }
-    //         // 放宽价格区间检查，允许一定偏差
-    //         let tolerance = tick.close * 0.1; // 允许10%的偏差
-    //         if tick.open.is_finite() && (tick.open < tick.low - tolerance || tick.open > tick.high + tolerance) {
-    //             return false;
-    //         }
-    //         if tick.close < tick.low - tolerance || tick.close > tick.high + tolerance {
-    //             return false;
-    //         }
-    //     }
-    
-    //     // ---------- 放宽成交均价检查 ----------
-    //     if tick.volume > 0 && tick.turnover.is_finite() && tick.turnover > 0.0
-    //         && tick.low.is_finite() && tick.high.is_finite() 
-    //         && tick.low > 0.0 && tick.high > 0.0
-    //     {
-    //         let avg_price = tick.turnover / tick.volume as f64;
-    //         let tolerance = (tick.high + tick.low) / 2.0 * 0.2; // 允许20%的偏差
-    //         if avg_price < tick.low - tolerance || avg_price > tick.high + tolerance {
-    //             return false;
-    //         }
-    //     }
-    
-    //     // ---------- 简化时间检查 ----------
-    //     // 只检查时间是否能解析，不严格限制交易时间
-    //     let _dt = match Self::parse_datetime_from_tick(tick) {
-    //         Some(t) => t,
-    //         None => return false, // 时间解析失败才拒绝
-    //     };
-        
-    //     // 暂时跳过交易时间段检查，允许所有时间的数据
-    //     // 这样可以包含夜盘、开盘前后等时段的数据
-        
-    //     true
-    // }
-    
+    #[inline]
     pub fn validate_tick(tick: &TickData) -> bool {
-        // ---------- 基本数值校验 ----------
-        // 开盘价、高、低、收盘必须为正且是有效数（非NaN/inf）
+        // ---------- 快速失败路径：最常用字段优先 ----------
+        // 收盘价是最关键的字段，优先检查
+        if tick.close <= 0.0 || !tick.close.is_finite() { return false; }
+        
+        // 其他价格字段检查
         if tick.open <= 0.0 { return false; }
         if tick.high <= 0.0 { return false; }
         if tick.low <= 0.0 { return false; }
-        if !tick.close.is_finite() || tick.close <= 0.0 { return false; }
+
+        // 字节级快速检查：避免字符串转换
+        if tick.comd[0] == 0 { return false; } // 品种代码不能为空
+        if tick.contract[0] == 0 { return false; } // 合约代码不能为空
+        if tick.trade_time[0] == 0 { return false; } // 交易时间不能为空
 
         // 昨日结算价需有效且大于0（用于涨跌停等校验）
         if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
@@ -285,8 +247,8 @@ impl Bar1MinAggregator {
         //     }
         // }
 
-        // ---------- 时段合法性校验 ----------
-        // 从 tick 中提取 datetime（自定义解析函数）
+        // ---------- 延迟昂贵操作到最后 ----------
+        // 最昂贵的操作：时间解析 + 字符串分配 + 交易时段查询
         let dt = match Self::parse_datetime_from_tick(tick) {
             Some(t) => t,
             None => return false, // 若无法解析时间戳，判为无效
@@ -294,7 +256,7 @@ impl Bar1MinAggregator {
 
         // 获取时间部分（NaiveTime）用于交易时段判断
         let time = dt.time();
-        let comd = to_string_field(&tick.comd); // 提取合约标识
+        let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
 
         // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
         TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
@@ -315,6 +277,7 @@ impl Bar1MinAggregator {
         self.current_bar_minute = Some(tick_minute);
     }
 
+    #[inline]
     fn parse_datetime_from_tick(tick: &TickData) -> Option<DateTime<Utc>> {
         let ts_str = to_string_field(&tick.trade_time);
         NaiveDateTime::parse_from_str(&ts_str, "%Y-%m-%d %H:%M:%S%.f")

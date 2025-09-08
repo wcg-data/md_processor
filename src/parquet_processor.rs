@@ -307,14 +307,13 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
         fixed_last_tick.trade_time = str_to_fixed::<24>(minute_str);
         
         // 构建聚合器状态 - 复用flush()业务逻辑
-        let mut aggregator = Bar1MinAggregator {
-            current_bar_minute: Some(minute_window),
-            prev_last_tick: prev_tick,
-            last_tick: Some(fixed_last_tick),
-            open: Some(open),
-            high: Some(high),
-            low: Some(low),
-        };
+        let mut aggregator = Bar1MinAggregator::new();
+        aggregator.current_bar_minute = Some(minute_window);
+        aggregator.prev_last_tick = prev_tick;
+        aggregator.last_tick = Some(fixed_last_tick);
+        aggregator.open = Some(open);
+        aggregator.high = Some(high);
+        aggregator.low = Some(low);
 
         // 使用flush生成最终BarData（保持所有业务逻辑）
         if let Some(bar) = aggregator.flush() {
@@ -381,108 +380,6 @@ fn extract_tick_from_grouped_row(df: &DataFrame, row_idx: usize, prefix: &str) -
     })
 }
 
-/// 将DataFrame行转换为TickData（用于优化版本）
-fn convert_row_to_tick(df: &DataFrame, row_idx: usize) -> anyhow::Result<TickData> {
-    let row = df.get_row(row_idx)?;
-    let get_str = |idx| match row.0[idx] {
-        AnyValue::String(v) => v,
-        _ => "",
-    };
-    let get_f64 = |idx| match row.0[idx] {
-        AnyValue::Float64(v) => v,
-        _ => 0.0,
-    };
-    let get_u32 = |idx| match row.0[idx] {
-        AnyValue::Int64(v) => v as u32,
-        AnyValue::UInt32(v) => v,
-        _ => 0,
-    };
-
-    let get_datetime_string = |idx| match &row.0[idx] {
-        AnyValue::String(s) => s.to_string(),
-        AnyValue::Datetime(v, _, _) => {
-            let naive = if *v > 1e15 as i64 {
-                NaiveDateTime::from_timestamp_micros(*v)
-                    .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
-            } else {
-                NaiveDateTime::from_timestamp_millis(*v)
-                    .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
-            };
-            naive.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-        },
-        _ => "".to_string(),
-    };
-
-    Ok(TickData {
-        contract: str_to_fixed::<9>(get_str(0)),
-        comd: str_to_fixed::<4>(get_str(1)),
-        exchange: str_to_fixed::<7>(get_str(2)),
-        date: str_to_fixed::<11>(&get_datetime_string(3)),
-        trade_time: str_to_fixed::<24>(&get_datetime_string(4)),
-        open: get_f64(5),
-        high: get_f64(5),
-        low: get_f64(5),
-        close: get_f64(5),
-        pre_settle: get_f64(6),
-        volume: get_u32(7),
-        turnover: get_f64(8),
-        open_interest: get_u32(9),
-        bid_price_1: get_f64(10),
-        bid_volume_1: get_u32(11),
-        ask_price_1: get_f64(12),
-        ask_volume_1: get_u32(13),
-        mid_price: get_f64(14),
-    })
-}
-
-/// 从聚合结果行构建TickData
-fn build_tick_from_row(df: &DataFrame, row_idx: usize, is_last: bool) -> anyhow::Result<TickData> {
-    let contract = df.column("contract")?.str()?.get(row_idx).unwrap_or("");
-    let comd = df.column("comd")?.str()?.get(row_idx).unwrap_or("");
-    let exchange = df.column("exchange")?.str()?.get(row_idx).unwrap_or("");
-    let date = df.column("date")?.str()?.get(row_idx).unwrap_or("");
-    
-    let time_col = if is_last { "last_time" } else { "first_time" };
-    let trade_time = df.column(time_col)?.str()?.get(row_idx).unwrap_or("");
-    
-    let close = df.column("close")?.f64()?.get(row_idx).unwrap_or(0.0);
-    let pre_settle = df.column("pre_settle")?.f64()?.get(row_idx).unwrap_or(0.0);
-    
-    let volume_col = if is_last { "last_volume" } else { "first_volume" };
-    let turnover_col = if is_last { "last_turnover" } else { "first_turnover" };
-    let oi_col = if is_last { "last_oi" } else { "first_oi" };
-    
-    let volume = df.column(volume_col)?.i64()?.get(row_idx).map(|v| v as u32).unwrap_or(0);
-    let turnover = df.column(turnover_col)?.f64()?.get(row_idx).unwrap_or(0.0);
-    let open_interest = df.column(oi_col)?.i64()?.get(row_idx).map(|v| v as u32).unwrap_or(0);
-    
-    let bid_price_1 = df.column("bid_price_1")?.f64()?.get(row_idx).unwrap_or(0.0);
-    let bid_volume_1 = df.column("bid_volume_1")?.i64()?.get(row_idx).map(|v| v as u32).unwrap_or(0);
-    let ask_price_1 = df.column("ask_price_1")?.f64()?.get(row_idx).unwrap_or(0.0);
-    let ask_volume_1 = df.column("ask_volume_1")?.i64()?.get(row_idx).map(|v| v as u32).unwrap_or(0);
-    let mid_price = df.column("mid_price")?.f64()?.get(row_idx).unwrap_or(0.0);
-
-    Ok(TickData {
-        contract: str_to_fixed::<9>(contract),
-        comd: str_to_fixed::<4>(comd),
-        exchange: str_to_fixed::<7>(exchange),
-        date: str_to_fixed::<11>(date),
-        trade_time: str_to_fixed::<24>(trade_time),
-        open: close,
-        high: close,
-        low: close,
-        close,
-        pre_settle,
-        volume,
-        turnover,
-        open_interest,
-        bid_price_1,
-        bid_volume_1,
-        ask_price_1,
-        ask_volume_1,
-        mid_price,
-    })
-}
 
 /// 将BarData写入Parquet文件
 fn write_bars_to_parquet<P: AsRef<Path>>(bars: &[BarData], output_path: P) -> anyhow::Result<()> {
