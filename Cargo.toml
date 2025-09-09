@@ -34,9 +34,6 @@ path = "src/md_processor.rs"
 name = "test_kafka"
 path = "src/test_kafka.rs"
 
-[[bin]]
-name = "trade_session_loader"
-path = "src/trade_session_loader.rs"
 
 [[bin]]
 name = "parquet_processor"
