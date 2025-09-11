@@ -220,8 +220,8 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
     let raw_df = LazyFrame::scan_parquet(path_str, Default::default())?
         .collect()?;
     
-    println!("原始数据行数: {}", raw_df.height());
-    println!("数据列名: {:?}", raw_df.get_column_names());
+    // println!("原始数据行数: {}", raw_df.height());
+    // println!("数据列名: {:?}", raw_df.get_column_names());
     
     // 基于 validate_tick 逻辑的高性能向量化过滤
     let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
@@ -241,7 +241,7 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
         .sort(["trade_time"], SortMultipleOptions::default())
         .collect()?;
     
-    println!("基础过滤后数据行数: {}", result_df.height());
+    // println!("基础过滤后数据行数: {}", result_df.height());
     
     // 交易时间过滤（优化后的逐行过滤）
     // 先获取当前品种代码（假设整个文件都是同一品种）
@@ -293,7 +293,7 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
             }
         }
         
-        println!("品种 {} 交易时间过滤后数据行数: {}", current_comd, valid_indices.len());
+        // println!("品种 {} 交易时间过滤后数据行数: {}", current_comd, valid_indices.len());
         
         if valid_indices.is_empty() {
             return Err(anyhow::anyhow!("过滤后数据为空，可能是所有tick都不在 {} 的交易时间内", current_comd));
@@ -532,7 +532,7 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
         return Ok(bars_df);
     }
 
-    println!("为品种 {} 补全缺失分钟bar (高性能版本)", comd);
+    // println!("为品种 {} 补全缺失分钟bar (高性能版本)", comd);
 
     // 先按时间排序原始数据
     let sorted_bars = bars_df.sort(["trade_time"], SortMultipleOptions::default())?;
@@ -576,14 +576,17 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     }
     complete_timeline.sort();
     
-    println!("完整时间序列: {} 个时间点", complete_timeline.len());
-    println!("现有数据: {} 个时间点", existing_data.len());
+    // println!("完整时间序列: {} 个时间点", complete_timeline.len());
+    // println!("现有数据: {} 个时间点", existing_data.len());
     
+
     // 优化：一次遍历分离数据，直接使用正确的数据类型
     let mut existing_indices = Vec::<u32>::new();
     let mut missing_times = Vec::<String>::new();
     let mut missing_prev_closes = Vec::<f64>::new();
+    let mut missing_price_types = Vec::<bool>::new(); // true表示有效价格，false表示NULL价格
     let mut last_close_price = 0.0f64;
+    let mut has_seen_first_trade = false;
     
     for time_point in complete_timeline {
         let time_str = time_point.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -592,10 +595,20 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
             // 现有数据
             existing_indices.push(row_idx as u32); // 直接使用u32，避免后续转换
             last_close_price = close_price;
+            has_seen_first_trade = true;
         } else {
             // 需要生成的空bar
             missing_times.push(time_str);
-            missing_prev_closes.push(last_close_price);
+            
+            if has_seen_first_trade {
+                // 第一个有成交tick之后：使用延续价格
+                missing_prev_closes.push(last_close_price);
+                missing_price_types.push(true); // 有效价格
+            } else {
+                // 第一个有成交tick之前：所有价格字段（包括prev_close）都应为NULL
+                missing_prev_closes.push(0.0); // 占位符，实际会设为NULL
+                missing_price_types.push(false); // 价格字段设为NULL
+            }
         }
     }
     
@@ -611,7 +624,8 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     // 第二步：批量生成所有空bar
     let empty_bars_df = if !missing_times.is_empty() {
         let count = missing_times.len();
-        println!("批量生成 {} 个空bar...", count);
+        // println!("批量生成 {} 个空bar...", count);
+        
         
         // 从模板获取基础值
         let template_row = sorted_bars.slice(0, 1);
@@ -628,10 +642,47 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
                 "volume" => Series::new("volume", vec![0u32; count]),
                 "turnover" => Series::new("turnover", vec![0.0f64; count]),
                 "open_interest_diff" => Series::new("open_interest_diff", vec![0i32; count]),
-                "log_return" => Series::new("log_return", vec![f64::NAN; count]),
-                "prev_close" => Series::new("prev_close", missing_prev_closes_ref),
+                "log_return" => {
+                    // log_return也根据是否在第一个有成交tick之前来决定填充策略
+                    let mut log_return_values: Vec<Option<f64>> = Vec::new();
+                    for (i, &is_valid_price) in missing_price_types.iter().enumerate() {
+                        if is_valid_price {
+                            // 有效价格的情况下，如果prev_close有值且>0，计算log_return，否则为NULL
+                            let prev_close_val = missing_prev_closes[i];
+                            if prev_close_val > 0.0 {
+                                log_return_values.push(Some(0.0)); // 延续价格情况下，log_return为0
+                            } else {
+                                log_return_values.push(None);
+                            }
+                        } else {
+                            log_return_values.push(None); // 价格为NULL时，log_return也为NULL
+                        }
+                    }
+                    Series::new("log_return", log_return_values)
+                },
+                "prev_close" => {
+                    // prev_close也根据是否在第一个有成交tick之前来决定填充策略
+                    let mut prev_close_values: Vec<Option<f64>> = Vec::new();
+                    for (i, &is_valid_price) in missing_price_types.iter().enumerate() {
+                        if is_valid_price {
+                            prev_close_values.push(Some(missing_prev_closes[i])); // 使用延续价格
+                        } else {
+                            prev_close_values.push(None); // 使用NULL
+                        }
+                    }
+                    Series::new("prev_close", prev_close_values)
+                },
                 "open" | "high" | "low" | "close" => {
-                    Series::new(field_name, missing_prev_closes_ref) // 价格延续
+                    // 根据是否在第一个有成交tick之前来决定价格填充策略
+                    let mut price_values: Vec<Option<f64>> = Vec::new();
+                    for (i, &is_valid_price) in missing_price_types.iter().enumerate() {
+                        if is_valid_price {
+                            price_values.push(Some(missing_prev_closes[i])); // 使用延续价格
+                        } else {
+                            price_values.push(None); // 使用NULL
+                        }
+                    }
+                    Series::new(field_name, price_values)
                 },
                 _ => {
                     // 其他字段从模板复制
@@ -666,9 +717,72 @@ fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     };
     
     // 最终排序
-    let final_result = final_result.sort(["trade_time"], SortMultipleOptions::default())?;
+    let mut final_result = final_result.sort(["trade_time"], SortMultipleOptions::default())?;
     
-    println!("补全完成，总bar数: {}", final_result.height());
+    // 找到第一个有成交的bar，将其prev_close也设为NULL
+    let volume_col = final_result.column("volume")?;
+    let mut first_trade_idx: Option<usize> = None;
+    for i in 0..volume_col.len() {
+        if let AnyValue::UInt32(vol) = volume_col.get(i)? {
+            if vol > 0 {
+                first_trade_idx = Some(i);
+                break;
+            }
+        }
+    }
+    
+    if let Some(idx) = first_trade_idx {
+        // 将第一个有成交bar的prev_close设为NULL
+        // 创建一个新的DataFrame，复制所有列，但修改prev_close列
+        let mut all_columns = Vec::new();
+        
+        for (col_name, _) in final_result.schema().iter() {
+            if col_name == "prev_close" {
+                // 替换prev_close列
+                let prev_close_col = final_result.column("prev_close")?;
+                let mut prev_close_values: Vec<Option<f64>> = Vec::new();
+                
+                for i in 0..prev_close_col.len() {
+                    if i == idx {
+                        prev_close_values.push(None); // 第一个有成交bar的prev_close设为NULL
+                    } else if let AnyValue::Float64(val) = prev_close_col.get(i)? {
+                        prev_close_values.push(Some(val));
+                    } else {
+                        prev_close_values.push(None); // 保持原有的NULL值
+                    }
+                }
+                
+                all_columns.push(Series::new("prev_close", prev_close_values));
+            } else if col_name == "log_return" {
+                // 同时处理log_return列：如果是第一个有成交bar，log_return设为NULL；同时将所有NaN转为NULL
+                let log_return_col = final_result.column("log_return")?;
+                let mut log_return_values: Vec<Option<f64>> = Vec::new();
+                
+                for i in 0..log_return_col.len() {
+                    if i == idx {
+                        log_return_values.push(None); // 第一个有成交bar的log_return设为NULL（因为prev_close为NULL）
+                    } else if let AnyValue::Float64(val) = log_return_col.get(i)? {
+                        if val.is_nan() {
+                            log_return_values.push(None); // 将NaN转换为NULL
+                        } else {
+                            log_return_values.push(Some(val));
+                        }
+                    } else {
+                        log_return_values.push(None); // 保持原有的NULL值
+                    }
+                }
+                
+                all_columns.push(Series::new("log_return", log_return_values));
+            } else {
+                // 其他列保持不变
+                all_columns.push(final_result.column(col_name)?.clone());
+            }
+        }
+        
+        final_result = DataFrame::new(all_columns)?;
+    }
+    
+    // println!("补全完成，总bar数: {}", final_result.height());
     Ok(final_result)
 }
 
@@ -804,49 +918,49 @@ fn process_batch_simple(data_source: &str, num_threads: usize) -> anyhow::Result
     Ok(())
 }
 
-/// 主函数
-// fn main() -> anyhow::Result<()> {
-//     let args: Vec<String> = std::env::args().collect();
-    
-//     let data_source = args.get(1).map(|s| s.as_str()).unwrap_or("dongzheng_data");
-//     let num_threads = args.get(2)
-//         .and_then(|s| s.parse::<usize>().ok())
-//         .unwrap_or(4);
-    
-//     println!("=== 原生并行处理 ===");
-//     println!("数据源: {}", data_source);
-//     println!("线程数: {}", num_threads);
-    
-//     process_batch_simple(data_source, num_threads)?;
-//     Ok(())
-// }
-
-
-// 单文件处理(请勿删除)
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+//  主函数
+fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
-    if args.len() < 3 {
-        println!("使用方法: {} <source_name> <contract>", args[0]);
-        println!("示例: {} dongzheng_data bb1710", args[0]);
-        return Ok(());
-    }
+    let data_source = args.get(1).map(|s| s.as_str()).unwrap_or("dongzheng_data");
+    let num_threads = args.get(2)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
     
-    let source_name = &args[1];
-    let contract = &args[2];
+    println!("=== 原生并行处理 ===");
+    println!("数据源: {}", data_source);
+    println!("线程数: {}", num_threads);
     
-    let data_dir = "/data/future_data";
-    let data_source = format!("{}/{}", data_dir, source_name);
-
-    let input_path = format!("{}/full_tick/{}.parquet", data_source, contract);
-    let output_path = format!("{}/full_bar_1min/{}_1min.parquet", data_source, contract);
-
-    println!("开始处理: {}", input_path);
-
-    match process_parquet_optimized(&input_path, &output_path) {
-        Ok(()) => println!("✓ 成功处理 {}", output_path),
-        Err(e) => println!("✗ 处理失败: {}", e),
-    }
-
+    process_batch_simple(data_source, num_threads)?;
     Ok(())
 }
+
+
+// // 单文件处理(用于测试，请勿删除)
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+//     let args: Vec<String> = std::env::args().collect();
+    
+//     if args.len() < 3 {
+//         println!("使用方法: {} <source_name> <contract>", args[0]);
+//         println!("示例: {} dongzheng_data bb1710", args[0]);
+//         return Ok(());
+//     }
+    
+//     let source_name = &args[1];
+//     let contract = &args[2];
+    
+//     let data_dir = "/data/future_data";
+//     let data_source = format!("{}/{}", data_dir, source_name);
+
+//     let input_path = format!("{}/full_tick/{}.parquet", data_source, contract);
+//     let output_path = format!("{}/full_bar_1min/{}_1min.parquet", data_source, contract);
+
+//     println!("开始处理: {}", input_path);
+
+//     match process_parquet_optimized(&input_path, &output_path) {
+//         Ok(()) => println!("✓ 成功处理 {}", output_path),
+//         Err(e) => println!("✗ 处理失败: {}", e),
+//     }
+
+//     Ok(())
+// }
