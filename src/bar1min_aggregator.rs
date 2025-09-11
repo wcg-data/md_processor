@@ -254,12 +254,11 @@ impl Bar1MinAggregator {
             None => return false, // 若无法解析时间戳，判为无效
         };
 
-        // 获取时间部分（NaiveTime）用于交易时段判断
-        let time = dt.time();
+        // 获取商品代码
         let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
 
         // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
-        TRADE_SESSION_MAP.is_in_trading_session(&comd, time)
+        TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
     }
 
 

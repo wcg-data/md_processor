@@ -2,7 +2,7 @@
 /// 多合约管理器
 
 use std::collections::{HashMap, HashSet};
-use chrono::NaiveTime;
+use chrono::NaiveDateTime;
 
 use crate::md_structures::{TickData, BarData};
 use crate::bar1min_aggregator::{Bar1MinAggregator};
@@ -30,7 +30,7 @@ impl AggregatorManager {
     pub fn update_active_contracts(
         &mut self,
         trade_sessions: &TradeSessionMap,
-        now: NaiveTime,
+        now: NaiveDateTime,
     ) {
         self.active_contracts.clear();
         for (contract, _) in self.bar1min_aggregators.iter() {

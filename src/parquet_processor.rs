@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
-use md_processor::md_structures::{TickData, BarData};
+use md_processor::md_structures::{TickData};
+use md_processor::trade_session_loader::TRADE_SESSION_MAP;
 // use md_processor::common_utils::{extract_contract_yymm, to_string_field};
 
 
@@ -187,6 +188,7 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P,  output_parquet_
     Ok(())
 }
 
+
 /// 从 parquet 文件加载并过滤数据
 fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<DataFrame> {
     let path_str = parquet_path.as_ref().to_str().unwrap();
@@ -214,61 +216,97 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
         }
     }
     
-    Ok(LazyFrame::scan_parquet(path_str, Default::default())?
+    // 先加载原始数据查看结构
+    let raw_df = LazyFrame::scan_parquet(path_str, Default::default())?
+        .collect()?;
+    
+    println!("原始数据行数: {}", raw_df.height());
+    println!("数据列名: {:?}", raw_df.get_column_names());
+    
+    // 基于 validate_tick 逻辑的高性能向量化过滤
+    let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
         .select([
             col("contract"), col("comd"), col("exchange"), col("date"), col("trade_time"),
-            col("close"), col("pre_settle"), col("volume"), col("turnover"), col("open_interest"),
+            col("open"), col("high"), col("low"), col("close"), col("pre_settle"), 
+            col("volume"), col("turnover"), col("open_interest"),
             col("bid_price_1"), col("bid_volume_1"), col("ask_price_1"), col("ask_volume_1"), col("mid_price"),
         ])
         .filter(
-            col("close").gt(lit(0.0))
-                .and(col("close").is_finite())
+            // 基本数据有效性过滤
+            col("close").is_not_null()
+                .and(col("close").gt(lit(0.0)))
                 .and(col("volume").is_not_null())
                 .and(col("turnover").is_not_null())
         )
         .sort(["trade_time"], SortMultipleOptions::default())
-        .collect()?)
-}
-
-/// 将BarData写入Parquet文件
-fn write_bars_to_parquet<P: AsRef<Path>>(bars: &[BarData], output_path: P) -> anyhow::Result<()> {
+        .collect()?;
     
-    let df_out = DataFrame::new(vec![
-        Series::new("contract", bars.iter().map(|b| b.contract.as_str()).collect::<Vec<_>>()),
-        Series::new("contract_yymm", bars.iter().map(|b| b.contract_yymm.as_str()).collect::<Vec<_>>()),
-        Series::new("comd", bars.iter().map(|b| b.comd.as_str()).collect::<Vec<_>>()),
-        Series::new("exchange", bars.iter().map(|b| b.exchange.as_str()).collect::<Vec<_>>()),
-        Series::new("date", bars.iter().map(|b| b.date.as_str()).collect::<Vec<_>>()),
-        Series::new("trade_time", bars.iter().map(|b| b.trade_time.as_str()).collect::<Vec<_>>()),
+    println!("基础过滤后数据行数: {}", result_df.height());
     
-        Series::new("open", bars.iter().map(|b| b.open).collect::<Vec<_>>()),
-        Series::new("high", bars.iter().map(|b| b.high).collect::<Vec<_>>()),
-        Series::new("low", bars.iter().map(|b| b.low).collect::<Vec<_>>()),
-        Series::new("close", bars.iter().map(|b| b.close).collect::<Vec<_>>()),
-        Series::new("prev_close", bars.iter().map(|b| b.prev_close).collect::<Vec<_>>()),
-        Series::new("pre_settle", bars.iter().map(|b| b.pre_settle).collect::<Vec<_>>()),
+    // 交易时间过滤（优化后的逐行过滤）
+    // 先获取当前品种代码（假设整个文件都是同一品种）
+    let current_comd = match result_df.column("comd")?.get(0)? {
+        AnyValue::String(v) => v.to_string(),
+        _ => return Err(anyhow::anyhow!("无法获取品种代码")),
+    };
     
-        Series::new("volume", bars.iter().map(|b| b.volume).collect::<Vec<_>>()),
-        Series::new("turnover", bars.iter().map(|b| b.turnover).collect::<Vec<_>>()),
-        Series::new("open_interest", bars.iter().map(|b| b.open_interest).collect::<Vec<_>>()),
-        Series::new("open_interest_diff", bars.iter().map(|b| b.open_interest_diff).collect::<Vec<_>>()),
+    // 获取该品种的交易时间范围
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
     
-        Series::new("bid_price_1", bars.iter().map(|b| b.bid_price_1).collect::<Vec<_>>()),
-        Series::new("bid_volume_1", bars.iter().map(|b| b.bid_volume_1).collect::<Vec<_>>()),
-        Series::new("ask_price_1", bars.iter().map(|b| b.ask_price_1).collect::<Vec<_>>()),
-        Series::new("ask_volume_1", bars.iter().map(|b| b.ask_volume_1).collect::<Vec<_>>()),
+    if !trading_ranges.is_empty() {
+        // 快速批量过滤：使用向量化操作提取时间列，然后批量检查
+        let mut valid_indices = Vec::new();
+        let trade_time_col = result_df.column("trade_time")?;
+        
+        for i in 0..result_df.height() {
+            if let Ok(any_val) = trade_time_col.get(i) {
+                let time_part = match any_val {
+                    AnyValue::String(v) => {
+                        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f")
+                            .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S")) {
+                            naive_dt.time()
+                        } else {
+                            continue;
+                        }
+                    },
+                    AnyValue::Datetime(v, _, _) => {
+                        let naive = if v > 1e15 as i64 {
+                            NaiveDateTime::from_timestamp_micros(v)
+                                .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                        } else {
+                            NaiveDateTime::from_timestamp_millis(v)
+                                .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                        };
+                        naive.time()
+                    },
+                    _ => continue,
+                };
+                
+                // 检查时间是否在任一交易时段内
+                let is_valid = trading_ranges.iter().any(|(start, end)| {
+                    time_part >= *start && time_part <= *end
+                });
+                
+                if is_valid {
+                    valid_indices.push(i as u32);
+                }
+            }
+        }
+        
+        println!("品种 {} 交易时间过滤后数据行数: {}", current_comd, valid_indices.len());
+        
+        if valid_indices.is_empty() {
+            return Err(anyhow::anyhow!("过滤后数据为空，可能是所有tick都不在 {} 的交易时间内", current_comd));
+        }
+        
+        // 根据有效索引过滤DataFrame
+        let indices_ca = UInt32Chunked::from_vec("", valid_indices);
+        result_df = result_df.take(&indices_ca)?;
+    } else {
+        println!("警告: 未找到品种 {} 的交易时间配置，跳过交易时间过滤", current_comd);
+    }
     
-        Series::new("mid_price", bars.iter().map(|b| b.mid_price).collect::<Vec<_>>()),
-        Series::new("vwap", bars.iter().map(|b| b.vwap).collect::<Vec<_>>()),
-        Series::new("log_return", bars.iter().map(|b| b.log_return).collect::<Vec<_>>()),
-    ])?;
-    
-    let file = File::create(output_path)?;
-    ParquetWriter::new(file)
-        .with_compression(ParquetCompression::Snappy)
-        .finish(&mut df_out.clone())?;
-    
-    Ok(())
+    Ok(result_df)
 }
 
 
@@ -306,6 +344,11 @@ fn create_minute_windows(mut df: DataFrame) -> anyhow::Result<DataFrame> {
 
 /// 执行分组聚合 - 向量化版本，优化常量字段处理
 fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String, String, String)> {
+    // 检查DataFrame是否为空
+    if df.height() == 0 {
+        return Err(anyhow::anyhow!("DataFrame为空，无法提取常量字段"));
+    }
+
     // 提取常量字段（整个文件都相同的字段）
     let contract = df.column("contract")?.get(0).unwrap().to_string().replace("\"", "");
     let comd = df.column("comd")?.get(0).unwrap().to_string().replace("\"", "");
@@ -470,6 +513,166 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
     Ok(bars_df)
 }
 
+/// 补全缺失的分钟bar：高性能批量操作，正确处理prev_close
+fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
+    if bars_df.height() == 0 {
+        return Ok(bars_df);
+    }
+
+    // 获取品种代码
+    let comd = match bars_df.column("comd")?.get(0)? {
+        AnyValue::String(v) => v.to_string(),
+        _ => return Ok(bars_df),
+    };
+
+    // 获取该品种的交易时间段
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&comd);
+    if trading_ranges.is_empty() {
+        println!("警告: 未找到品种 {} 的交易时间配置，跳过补全", comd);
+        return Ok(bars_df);
+    }
+
+    println!("为品种 {} 补全缺失分钟bar (高性能版本)", comd);
+
+    // 先按时间排序原始数据
+    let sorted_bars = bars_df.sort(["trade_time"], SortMultipleOptions::default())?;
+    
+    // 收集现有数据信息
+    let mut existing_data: std::collections::HashMap<String, (usize, f64)> = std::collections::HashMap::new();
+    let mut date_range: std::collections::HashSet<chrono::NaiveDate> = std::collections::HashSet::new();
+    
+    let trade_times = sorted_bars.column("trade_time")?;
+    let close_prices = sorted_bars.column("close")?;
+    
+    for i in 0..trade_times.len() {
+        if let (AnyValue::String(time_str), close_val) = (trade_times.get(i).unwrap(), close_prices.get(i).unwrap()) {
+            if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                let close_price = match close_val {
+                    AnyValue::Float64(price) => price,
+                    _ => 0.0,
+                };
+                existing_data.insert(time_str.to_string(), (i, close_price));
+                date_range.insert(parsed.date());
+            }
+        }
+    }
+    
+    if date_range.is_empty() {
+        return Ok(sorted_bars);
+    }
+
+    // 一次遍历：生成时间序列的同时分离数据，避免重复遍历
+    let mut complete_timeline: Vec<chrono::NaiveDateTime> = Vec::new();
+    for date in &date_range {
+        for (start_time, end_time) in &trading_ranges {
+            let mut current_time = date.and_time(*start_time);
+            let end_datetime = date.and_time(*end_time);
+            
+            while current_time <= end_datetime {
+                complete_timeline.push(current_time);
+                current_time = current_time + chrono::Duration::minutes(1);
+            }
+        }
+    }
+    complete_timeline.sort();
+    
+    println!("完整时间序列: {} 个时间点", complete_timeline.len());
+    println!("现有数据: {} 个时间点", existing_data.len());
+    
+    // 优化：一次遍历分离数据，直接使用正确的数据类型
+    let mut existing_indices = Vec::<u32>::new();
+    let mut missing_times = Vec::<String>::new();
+    let mut missing_prev_closes = Vec::<f64>::new();
+    let mut last_close_price = 0.0f64;
+    
+    for time_point in complete_timeline {
+        let time_str = time_point.format("%Y-%m-%d %H:%M:%S").to_string();
+        
+        if let Some(&(row_idx, close_price)) = existing_data.get(&time_str) {
+            // 现有数据
+            existing_indices.push(row_idx as u32); // 直接使用u32，避免后续转换
+            last_close_price = close_price;
+        } else {
+            // 需要生成的空bar
+            missing_times.push(time_str);
+            missing_prev_closes.push(last_close_price);
+        }
+    }
+    
+    // 第一步：获取所有现有数据
+    let existing_rows_df = if !existing_indices.is_empty() {
+        // 直接使用u32类型的indices，无需转换
+        let indices_ca = UInt32Chunked::new("indices", existing_indices);
+        sorted_bars.take(&indices_ca)?
+    } else {
+        DataFrame::empty()
+    };
+    
+    // 第二步：批量生成所有空bar
+    let empty_bars_df = if !missing_times.is_empty() {
+        let count = missing_times.len();
+        println!("批量生成 {} 个空bar...", count);
+        
+        // 从模板获取基础值
+        let template_row = sorted_bars.slice(0, 1);
+        let schema = sorted_bars.schema();
+        let mut series_vec = Vec::new();
+        
+        // 预提取常用数据，避免重复克隆
+        let missing_times_ref = &missing_times;
+        let missing_prev_closes_ref = &missing_prev_closes;
+        
+        for (field_name, _) in schema.iter() {
+            let series = match field_name.as_str() {
+                "trade_time" => Series::new("trade_time", missing_times_ref),
+                "volume" => Series::new("volume", vec![0u32; count]),
+                "turnover" => Series::new("turnover", vec![0.0f64; count]),
+                "open_interest_diff" => Series::new("open_interest_diff", vec![0i32; count]),
+                "log_return" => Series::new("log_return", vec![f64::NAN; count]),
+                "prev_close" => Series::new("prev_close", missing_prev_closes_ref),
+                "open" | "high" | "low" | "close" => {
+                    Series::new(field_name, missing_prev_closes_ref) // 价格延续
+                },
+                _ => {
+                    // 其他字段从模板复制
+                    let template_col = template_row.column(field_name)?;
+                    let template_val = template_col.get(0)?;
+                    
+                    match template_val {
+                        AnyValue::String(s) => Series::new(field_name, vec![s; count]),
+                        AnyValue::Float64(f) => Series::new(field_name, vec![f; count]),
+                        AnyValue::UInt32(u) => Series::new(field_name, vec![u; count]),
+                        AnyValue::Int32(i) => Series::new(field_name, vec![i; count]),
+                        AnyValue::Null => Series::new_null(field_name, count),
+                        _ => return Err(anyhow::anyhow!("不支持的数据类型: {:?}", template_val)),
+                    }
+                }
+            };
+            series_vec.push(series);
+        }
+        
+        DataFrame::new(series_vec)?
+    } else {
+        DataFrame::empty()
+    };
+    
+    // 第三步：合并现有数据和空bar数据
+    let final_result = if existing_rows_df.height() > 0 && empty_bars_df.height() > 0 {
+        existing_rows_df.vstack(&empty_bars_df)?
+    } else if existing_rows_df.height() > 0 {
+        existing_rows_df
+    } else {
+        empty_bars_df
+    };
+    
+    // 最终排序
+    let final_result = final_result.sort(["trade_time"], SortMultipleOptions::default())?;
+    
+    println!("补全完成，总bar数: {}", final_result.height());
+    Ok(final_result)
+}
+
+
 /// 向量化历史数据处理：完全基于polars向量化操作
 pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet_path: P) -> anyhow::Result<()> {
     // 1. 读取和过滤数据
@@ -482,7 +685,16 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
     let (grouped_df, contract, comd, exchange) = perform_group_aggregation(df_with_minute)?;
     
     // 4. 执行跨窗口计算（向量化）
-    let mut bars_df = build_bars_vectorized(grouped_df, &contract, &comd, &exchange)?;
+    let bars_df = build_bars_vectorized(grouped_df, &contract, &comd, &exchange)?;
+    
+    // 4.5. 补全缺失分钟（可选，失败不影响主流程）
+    let mut bars_df = match fill_missing_minutes(bars_df.clone()) {
+        Ok(filled) => filled,
+        Err(e) => {
+            eprintln!("警告: 缺失分钟补全失败: {}, 使用原始数据", e);
+            bars_df
+        }
+    };
 
     // 5. 直接写入parquet，避免复杂的数据转换
     let file = File::create(output_parquet_path)?;
@@ -592,14 +804,14 @@ fn process_batch_simple(data_source: &str, num_threads: usize) -> anyhow::Result
     Ok(())
 }
 
-// /// 主函数
+/// 主函数
 // fn main() -> anyhow::Result<()> {
 //     let args: Vec<String> = std::env::args().collect();
     
 //     let data_source = args.get(1).map(|s| s.as_str()).unwrap_or("dongzheng_data");
 //     let num_threads = args.get(2)
 //         .and_then(|s| s.parse::<usize>().ok())
-//         .unwrap_or(32);
+//         .unwrap_or(4);
     
 //     println!("=== 原生并行处理 ===");
 //     println!("数据源: {}", data_source);
