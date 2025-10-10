@@ -1,4 +1,4 @@
-from confluent_kafka import Consumer, KafkaException, KafkaError, TopicPartition
+≥from confluent_kafka import Consumer, KafkaException, KafkaError, TopicPartition
 from collections import defaultdict, deque
 import json
 import time

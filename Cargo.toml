@@ -23,7 +23,7 @@ once_cell = "1.19.0"
 schema_registry_converter = { version = "4.0", features = ["avro"] }
 csv = "1.3"
 rayon = "1.10"
-polars = { version = "0.41", features = ["lazy", "parquet","serde","ndarray"] }
+polars = { version = "0.41", features = ["lazy", "parquet","serde","ndarray", "dtype-decimal"] }
 
 
 [[bin]]
@@ -36,5 +36,11 @@ path = "src/test_kafka.rs"
 
 
 [[bin]]
-name = "parquet_processor"
-path = "src/parquet_processor.rs"
+name = "parquet_processor_on_batch"
+path = "src/parquet_processor_on_batch.rs"
+
+
+[[bin]]
+name = "parquet_processor_on_tick"
+path = "src/parquet_processor_on_tick.rs"
+

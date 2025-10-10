@@ -63,7 +63,7 @@ fn single_contract_loop(
                     .to_string();
                 if contracts_filter.contains(&contract_str) {
                     // tick.print(); // 如需调试可解除注释
-                    if let Some(bar) = aggregator.on_tick(&tick) {
+                    if let Some(bar) = aggregator.on_tick(&mut tick.clone()) {
                         // bar.print();
                         // bar.send_to_kafka();
                         kafka_client::send_bar_data(&bar, "1min");
@@ -106,9 +106,9 @@ fn multi_contract_loop(ring_buffer: &mut SharedRingBuffer, running: &Arc<AtomicB
         }
 
         // ---------------- Tick 驱动 ----------------
-        if let Some(tick) = ring_buffer.pop_market_data() {
+        if let Some(mut tick) = ring_buffer.pop_market_data() {
             // ③ Tick → 1 min
-            if let Some(bar1min) = manager.on_tick(&tick) {
+            if let Some(bar1min) = manager.on_tick(&mut tick) {
                 kafka_client::send_bar_data(&bar1min, "1min");
 
                 // ④ 及时投喂 5 min 聚合器

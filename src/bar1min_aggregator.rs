@@ -44,7 +44,7 @@ impl Bar1MinAggregator {
                 } else {
                     self.high = Some(tick.close);
                 }
-                
+
                 if let Some(ref mut l) = self.low {
                     if tick.close < *l {
                         *l = tick.close;
@@ -123,25 +123,39 @@ impl Bar1MinAggregator {
         let comd = to_string_field(&last_tick.comd);
         let exchange = to_string_field(&last_tick.exchange);
         let date = to_string_field(&last_tick.date);
-        // 优化：复用缓存的时间，避免重复解析
-        let parsed_time = self.cached_tick_time.or_else(|| Self::parse_datetime_from_tick(&last_tick))?;
+        // 直接解析last_tick的时间（不使用cached_tick_time，避免窗口切换时的缓存不一致问题）
+        let parsed_time = Self::parse_datetime_from_tick(&last_tick)?;
         let trade_time = align_to_bar_minute(&parsed_time)
             .format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let prev_last_tick = self.prev_last_tick.unwrap_or(last_tick);
-        let volume = last_tick.volume.saturating_sub(prev_last_tick.volume);
-        let turnover = (last_tick.turnover - prev_last_tick.turnover).max(0.0);
-        let oi_diff = last_tick.open_interest.wrapping_sub(prev_last_tick.open_interest) as i32;
+        // 根据是否有上一个bar，分别处理volume/turnover/oi_diff计算
+        let (volume, turnover, oi_diff, prev_close) = if let Some(prev) = self.prev_last_tick {
+            // 有上一个bar：计算差分
+            (
+                last_tick.volume.saturating_sub(prev.volume),
+                (last_tick.turnover - prev.turnover).max(0.0),
+                last_tick.open_interest.wrapping_sub(prev.open_interest) as i32,
+                prev.close
+            )
+        } else {
+            // 第一个bar：直接使用当前累计值
+            (
+                last_tick.volume,
+                last_tick.turnover,
+                last_tick.open_interest as i32,
+                last_tick.close  // 第一个bar的prev_close也使用当前close
+            )
+        };
 
-        // 计算 log_return，若 prev_last_tick.close <= 0 则返回 0.0 以避免非法对数
-        let log_return =  (last_tick.close / prev_last_tick.close).ln();
+        // 计算 log_return
+        let log_return = (last_tick.close / prev_close).ln();
 
-        // volume和turnover一致性检查
+        // volume和turnover一致性检查 - 暂时注释，与on_batch保持一致
         // 只在明显异常的情况下才丢弃数据
-        if volume == 0 && turnover > 0.0 {  
-            // 静默处理，不输出大量警告日志
-            return None;
-        }
+        // if volume == 0 && turnover > 0.0 {
+        //     // 静默处理，不输出大量警告日志
+        //     return None;
+        // }
 
         let bar = BarData {
             contract: contract.clone(),
@@ -154,7 +168,7 @@ impl Bar1MinAggregator {
             high: self.high.unwrap_or(last_tick.close),
             low: self.low.unwrap_or(last_tick.close),
             close: last_tick.close,
-            prev_close: prev_last_tick.close,
+            prev_close,
             pre_settle: last_tick.pre_settle,
             volume,
             turnover,
@@ -184,54 +198,83 @@ impl Bar1MinAggregator {
     }
     
     #[inline]
-    pub fn validate_tick(tick: &TickData) -> bool {
+    pub fn validate_tick(tick: &mut TickData) -> bool {
         // ---------- 快速失败路径：最常用字段优先 ----------
         // 收盘价是最关键的字段，优先检查
-        if tick.close <= 0.0 || !tick.close.is_finite() { return false; }
-        
+        if tick.close <= 0.0 || !tick.close.is_finite() {
+            return false;
+        }
+
         // 其他价格字段检查
-        if tick.open <= 0.0 { return false; }
-        if tick.high <= 0.0 { return false; }
-        if tick.low <= 0.0 { return false; }
+        // if tick.open <= 0.0 { return false; }
+        // if tick.high <= 0.0 { return false; }
+        // if tick.low <= 0.0 { return false; }
 
         // 字节级快速检查：避免字符串转换
         if tick.comd[0] == 0 { return false; } // 品种代码不能为空
         if tick.contract[0] == 0 { return false; } // 合约代码不能为空
         if tick.trade_time[0] == 0 { return false; } // 交易时间不能为空
 
-        // 昨日结算价需有效且大于0（用于涨跌停等校验）
-        if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
+        // // 昨日结算价需有效且大于0（用于涨跌停等校验）
+        // if !tick.pre_settle.is_finite() || tick.pre_settle <= 0.0 { return false; }
 
         // 成交额不能为负（允许为 0）
         if tick.turnover < 0.0 { return false; }
 
-        // 买卖一价必须大于 0
-        if tick.bid_price_1 <= 0.0 { return false; }
-        if tick.ask_price_1 <= 0.0 { return false; }
+        // bid/ask价格检查 - 与on_batch保持一致
+        // 过滤掉bid<0或ask<0的tick，但允许bid=0和ask=0
+        if tick.bid_price_1 < 0.0 || !tick.bid_price_1.is_finite() { return false; }
+        if tick.ask_price_1 < 0.0 || !tick.ask_price_1.is_finite() { return false; }
 
-        // 买一价不能大于卖一价（防止撮合错误）
-        if tick.bid_price_1 > tick.ask_price_1 { return false; }
-
-        // ---------- 合理价格区间校验 ----------
-        // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系
-        if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
-            if tick.high < tick.low { return false; }              // high 必须 ≥ low
-            if tick.open < tick.low || tick.open > tick.high {     // open 必须在区间内
-                return false;
-            }
-            if tick.close < tick.low || tick.close > tick.high {   // close 必须在区间内
-                return false;
-            }
-        }
-
-        // ---------- 成交量与成交额的一致性校验 ----------
-        // 要求：
-        // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
-        // - volume > 0 时，turnover 必须为正
-        if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
-            || (tick.volume > 0 && tick.turnover > 0.0)) {
+        // bid <= ask 检查：只在bid和ask都>0时才要求bid<=ask（与on_batch保持一致）
+        // 如果bid=0或ask=0，则跳过检查；只有当两者都>0时才要求bid<=ask
+        if tick.bid_price_1 > 0.0 && tick.ask_price_1 > 0.0 && tick.bid_price_1 > tick.ask_price_1 {
             return false;
         }
+
+        // // 清理bid/ask为0的情况：将0值设为NaN（用于后续mid_price计算）
+        // if tick.bid_price_1 == 0.0 {
+        //     tick.bid_price_1 = f64::NAN;
+        //     tick.bid_volume_1 = 0;
+        // }
+        // if tick.ask_price_1 == 0.0 {
+        //     tick.ask_price_1 = f64::NAN;
+        //     tick.ask_volume_1 = 0;
+        // }
+
+        // if tick.mid_price < 0.0 { return false; }
+
+        // // 重新计算mid_price（此时bid/ask为0已被转为NaN）
+        // if tick.bid_price_1.is_nan() && tick.ask_price_1.is_nan() {
+        //     tick.mid_price = f64::NAN;
+        // } else if tick.bid_price_1.is_nan() {
+        //     tick.mid_price = tick.ask_price_1;
+        // } else if tick.ask_price_1.is_nan() {
+        //     tick.mid_price = tick.bid_price_1;
+        // } else {
+        //     tick.mid_price = (tick.bid_price_1 + tick.ask_price_1) / 2.0;
+        // }
+
+        // ---------- 合理价格区间校验 ----------
+        // // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系
+        // if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
+        //     if tick.high < tick.low { return false; }              // high 必须 ≥ low
+        //     if tick.open < tick.low || tick.open > tick.high {     // open 必须在区间内
+        //         return false;
+        //     }
+        //     if tick.close < tick.low || tick.close > tick.high {   // close 必须在区间内
+        //         return false;
+        //     }
+        // }
+
+        // // ---------- volume和turnover的一致性校验 ----------
+        // // 要求：
+        // // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
+        // // - volume > 0 时，turnover 必须为正
+        // if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+        //     || (tick.volume > 0 && tick.turnover > 0.0)) {
+        //     return false;
+        // }
 
         // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
         let eps = 1e-6; // 容差，避免浮点误差带来的误判
@@ -249,16 +292,23 @@ impl Bar1MinAggregator {
 
         // ---------- 延迟昂贵操作到最后 ----------
         // 最昂贵的操作：时间解析 + 字符串分配 + 交易时段查询
-        let dt = match Self::parse_datetime_from_tick(tick) {
-            Some(t) => t,
-            None => return false, // 若无法解析时间戳，判为无效
-        };
+        // let dt = match Self::parse_datetime_from_tick(tick) {
+        //     Some(t) => t,
+        //     None => return false, // 若无法解析时间戳，判为无效
+        // };
 
-        // 获取商品代码
-        let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
+        // // 获取商品代码
+        // let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
 
-        // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
-        TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
+        // // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+        // // 如果该品种没有交易时段配置，则跳过交易时段检查（允许通过）
+        // let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
+        // if trading_ranges.is_empty() {
+        //     return true;  // 没有配置则不过滤
+        // }
+        // TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
+
+        true  // 暂时注释交易时段检查，与on_batch保持一致
     }
 
 
@@ -266,9 +316,8 @@ impl Bar1MinAggregator {
 
     /// 初始化新窗口
     fn init_bar_window(&mut self, tick: &TickData, tick_minute: DateTime<Utc>) {
-        if self.prev_last_tick.is_none() {
-            self.prev_last_tick = Some(*tick);
-        }
+        // 不再初始化prev_last_tick，保持为None（第一个bar）或保持上一个bar的值
+        // 这样第一个bar的volume计算才正确
         self.last_tick = Some(*tick);
         self.open = Some(tick.close);
         self.high = Some(tick.close);

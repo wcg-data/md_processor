@@ -41,7 +41,7 @@ impl AggregatorManager {
         }
     }
 
-    pub fn on_tick(&mut self, tick: &TickData) -> Option<BarData> {
+    pub fn on_tick(&mut self, tick: &mut TickData) -> Option<BarData> {
         if !Bar1MinAggregator::validate_tick(tick) {
             return None;
         }

@@ -1,7 +1,11 @@
 // common_utils, 处理字符串和时间相关函数
 
-use chrono::{DateTime, Timelike, Utc};
-use chrono::TimeZone; 
+use chrono::{DateTime, Timelike, Utc, NaiveDate, Datelike, NaiveDateTime, NaiveTime};
+use chrono::TimeZone;
+use polars::prelude::*;
+use std::collections::{HashMap, HashSet};
+use crate::trade_session_loader::TRADE_SESSION_MAP;
+use anyhow; 
 
 pub fn to_string_field(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).trim_end_matches('\0').to_string()
@@ -30,4 +34,489 @@ pub fn floor_to_1min(ts: &DateTime<Utc>) -> DateTime<Utc> {
 pub fn floor_to_5min(dt: &DateTime<Utc>) -> DateTime<Utc> {
     let ts = dt.timestamp();
     Utc.timestamp_opt(ts - (ts % 300), 0).single().unwrap()
+}
+
+/// 计算当前日期距离合约到期月份的月数差
+/// contract_yymm 格式: "2505", "2412"
+/// date 格式: "2025-04-13"
+pub fn calculate_maturity_month(contract_yymm: &str, date: &str) -> i16 {
+    if contract_yymm.len() != 4 || date.len() < 10 {
+        return 0;
+    }
+    
+    // 解析合约年月
+    let contract_year = match contract_yymm[0..2].parse::<i32>() {
+        Ok(yy) => 2000 + yy, // "25" -> 2025
+        Err(_) => return 0,
+    };
+    let contract_month = match contract_yymm[2..4].parse::<i32>() {
+        Ok(mm) => mm,
+        Err(_) => return 0,
+    };
+    
+    // 解析当前日期
+    let current_date = match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    
+    // 计算月数差
+    let current_year = current_date.year();
+    let current_month = current_date.month() as i32;
+    
+    let months_diff = (contract_year - current_year) * 12 + (contract_month - current_month);
+    months_diff as i16
+}
+
+/// 计算当前日期距离合约到期月份第一天的天数差
+/// contract_yymm 格式: "2505", "2412"
+/// date 格式: "2025-04-13"
+pub fn calculate_maturity_day(contract_yymm: &str, date: &str) -> i16 {
+    if contract_yymm.len() != 4 || date.len() < 10 {
+        return 0;
+    }
+    
+    // 解析合约年月
+    let contract_year = match contract_yymm[0..2].parse::<i32>() {
+        Ok(yy) => 2000 + yy, // "25" -> 2025
+        Err(_) => return 0,
+    };
+    let contract_month = match contract_yymm[2..4].parse::<u32>() {
+        Ok(mm) => mm,
+        Err(_) => return 0,
+    };
+    
+    // 解析当前日期
+    let current_date = match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    
+    // 构造合约到期月份的第一天
+    let maturity_first_day = match NaiveDate::from_ymd_opt(contract_year, contract_month, 1) {
+        Some(d) => d,
+        None => return 0,
+    };
+    
+    // 计算天数差
+    let days_diff = maturity_first_day.signed_duration_since(current_date).num_days();
+    days_diff as i16
+}
+
+/// 补全缺失的分钟bar：高性能批量操作，正确处理prev_close
+/// 从 parquet_processor_on_batch.rs 提取，用于离线和在线处理的代码复用
+pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
+    if bars_df.height() == 0 {
+        return Ok(bars_df);
+    }
+
+    // 获取品种代码
+    let comd = match bars_df.column("comd")?.get(0)? {
+        AnyValue::String(v) => v.to_string(),
+        _ => return Ok(bars_df),
+    };
+
+    // 获取该品种的交易时间段
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&comd);
+    if trading_ranges.is_empty() {
+        println!("警告: 未找到品种 {} 的交易时间配置，跳过补全", comd);
+        return Ok(bars_df);
+    }
+
+    // 先按时间排序原始数据
+    let sorted_bars = bars_df.sort(["trade_time"], SortMultipleOptions::default())?;
+
+    // 收集现有数据信息
+    let mut existing_data: HashMap<String, (usize, f64)> = HashMap::new();
+    let mut date_range: HashSet<NaiveDate> = HashSet::new();
+
+    let trade_times = sorted_bars.column("trade_time")?;
+    let close_prices = sorted_bars.column("close")?;
+
+    for i in 0..trade_times.len() {
+        if let (AnyValue::String(time_str), close_val) = (trade_times.get(i).unwrap(), close_prices.get(i).unwrap()) {
+            if let Ok(parsed) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                let close_price = match close_val {
+                    AnyValue::Float64(price) => price,
+                    _ => 0.0,
+                };
+                existing_data.insert(time_str.to_string(), (i, close_price));
+                date_range.insert(parsed.date());
+            }
+        }
+    }
+
+    if date_range.is_empty() {
+        return Ok(sorted_bars);
+    }
+
+    // 一次遍历：生成时间序列的同时分离数据，避免重复遍历（修复夜盘跨日问题）
+    let mut complete_timeline: Vec<NaiveDateTime> = Vec::new();
+    for date in &date_range {
+        for (start_time, end_time) in &trading_ranges {
+            if start_time > end_time {
+                // 跨日交易时段（如21:00-02:30）
+                // 第一段：当日start_time到23:59
+                let mut current_time = date.and_time(*start_time);
+                let day_end = date.and_time(NaiveTime::from_hms_opt(23, 59, 0).unwrap());
+
+                while current_time <= day_end {
+                    complete_timeline.push(current_time);
+                    current_time = current_time + chrono::Duration::minutes(1);
+                }
+
+                // 第二段：次日00:00到end_time
+                let next_date = *date + chrono::Duration::days(1);
+                current_time = next_date.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                let end_datetime = next_date.and_time(*end_time);
+
+                while current_time <= end_datetime {
+                    complete_timeline.push(current_time);
+                    current_time = current_time + chrono::Duration::minutes(1);
+                }
+            } else {
+                // 正常日间交易时段
+                let mut current_time = date.and_time(*start_time);
+                let end_datetime = date.and_time(*end_time);
+
+                while current_time <= end_datetime {
+                    complete_timeline.push(current_time);
+                    current_time = current_time + chrono::Duration::minutes(1);
+                }
+            }
+        }
+    }
+    complete_timeline.sort();
+
+    // 优化：一次遍历分离数据，直接使用正确的数据类型
+    let mut existing_indices = Vec::<u32>::new();
+    let mut missing_times = Vec::<String>::new();
+    let mut missing_prev_closes = Vec::<f64>::new();
+    let mut last_close_price = 0.0f64;
+    let mut has_seen_first_trade = false;
+
+    // 首先找到第一个有成交的时间点
+    let mut first_trade_time: Option<NaiveDateTime> = None;
+    let volume_col = sorted_bars.column("volume")?;
+    for i in 0..volume_col.len() {
+        if let AnyValue::UInt32(vol) = volume_col.get(i)? {
+            if vol > 0 {
+                if let AnyValue::String(time_str) = trade_times.get(i).unwrap() {
+                    if let Ok(parsed) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                        first_trade_time = Some(parsed);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for time_point in complete_timeline {
+        // 如果存在第一个有成交的时间点，且当前时间点在其之前，则跳过
+        if let Some(first_trade) = first_trade_time {
+            if time_point < first_trade {
+                continue; // 跳过第一个有成交tick之前的时间点
+            }
+        }
+
+        let time_str = time_point.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        if let Some(&(row_idx, close_price)) = existing_data.get(&time_str) {
+            // 现有数据
+            existing_indices.push(row_idx as u32);
+            last_close_price = close_price;
+            has_seen_first_trade = true;
+        } else if has_seen_first_trade {
+            // 只在第一个有成交tick之后补全缺失的bar
+            missing_times.push(time_str);
+            missing_prev_closes.push(last_close_price);
+        }
+    }
+
+    // 第一步：获取所有现有数据
+    let existing_rows_df = if !existing_indices.is_empty() {
+        let indices_ca = UInt32Chunked::new("indices", existing_indices);
+        sorted_bars.take(&indices_ca)?
+    } else {
+        DataFrame::empty()
+    };
+
+    // 第二步：批量生成所有空bar
+    let empty_bars_df = if !missing_times.is_empty() {
+        let count = missing_times.len();
+
+        // 从模板获取基础值
+        let template_row = sorted_bars.slice(0, 1);
+        let schema = sorted_bars.schema();
+        let mut series_vec = Vec::new();
+
+        // 预提取常用数据，避免重复克隆
+        let missing_times_ref = &missing_times;
+        let missing_prev_closes_ref = &missing_prev_closes;
+
+        for (field_name, _) in schema.iter() {
+            let series = match field_name.as_str() {
+                "trade_time" => Series::new("trade_time", missing_times_ref),
+                "volume" => Series::new("volume", vec![0u32; count]),
+                "turnover" => Series::new("turnover", vec![0.0f64; count]),
+                "open_interest_diff" => Series::new("open_interest_diff", vec![0i32; count]),
+                "log_return" => {
+                    // 延续价格情况下，log_return为0
+                    Series::new("log_return", vec![0.0f64; count])
+                },
+                "prev_close" => {
+                    // 使用延续价格
+                    Series::new("prev_close", missing_prev_closes_ref.clone())
+                },
+                "open" | "high" | "low" | "close" => {
+                    // 使用延续价格
+                    Series::new(field_name, missing_prev_closes_ref.clone())
+                },
+                "date" => {
+                    // 特殊处理date字段：为夜盘时段设置正确的交易日期
+                    let mut date_values: Vec<String> = Vec::new();
+                    for time_str in missing_times_ref {
+                        if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                            let hour = dt.hour();
+                            let mut trading_date = dt.date();
+
+                            // 夜盘前半段（00:00-02:30）属于前一个交易日
+                            if hour < 3 {
+                                trading_date = trading_date - chrono::Duration::days(1);
+                            }
+
+                            date_values.push(trading_date.format("%Y-%m-%d").to_string());
+                        } else {
+                            // 解析失败时使用模板值
+                            let template_col = template_row.column("date")?;
+                            let template_val = template_col.get(0)?;
+                            if let AnyValue::String(s) = template_val {
+                                date_values.push(s.to_string());
+                            } else {
+                                date_values.push("".to_string());
+                            }
+                        }
+                    }
+                    Series::new("date", date_values)
+                },
+                _ => {
+                    // 其他字段从模板复制
+                    let template_col = template_row.column(field_name)?;
+                    let template_val = template_col.get(0)?;
+
+                    // 直接根据列的数据类型来处理
+                    let col_dtype = template_col.dtype();
+
+                    match col_dtype {
+                        DataType::String => {
+                            if let AnyValue::String(s) = template_val {
+                                Series::new(field_name, vec![s; count])
+                            } else {
+                                Series::new(field_name, vec![""; count])
+                            }
+                        },
+                        DataType::Float64 => {
+                            if let AnyValue::Float64(f) = template_val {
+                                Series::new(field_name, vec![f; count])
+                            } else {
+                                Series::new(field_name, vec![0.0f64; count])
+                            }
+                        },
+                        DataType::Float32 => {
+                            if let AnyValue::Float32(f) = template_val {
+                                Series::new(field_name, vec![f; count])
+                            } else {
+                                Series::new(field_name, vec![0.0f32; count])
+                            }
+                        },
+                        DataType::UInt64 => {
+                            if let AnyValue::UInt64(u) = template_val {
+                                Series::new(field_name, vec![u; count])
+                            } else {
+                                Series::new(field_name, vec![0u64; count])
+                            }
+                        },
+                        DataType::UInt32 => {
+                            if let AnyValue::UInt32(u) = template_val {
+                                Series::new(field_name, vec![u; count])
+                            } else {
+                                Series::new(field_name, vec![0u32; count])
+                            }
+                        },
+                        DataType::UInt16 => {
+                            if let AnyValue::UInt16(u) = template_val {
+                                Series::new(field_name, vec![u as u32; count])
+                            } else {
+                                Series::new(field_name, vec![0u32; count])
+                            }
+                        },
+                        DataType::UInt8 => {
+                            if let AnyValue::UInt8(u) = template_val {
+                                Series::new(field_name, vec![u as u32; count])
+                            } else {
+                                Series::new(field_name, vec![0u32; count])
+                            }
+                        },
+                        DataType::Int64 => {
+                            if let AnyValue::Int64(i) = template_val {
+                                Series::new(field_name, vec![i; count])
+                            } else {
+                                Series::new(field_name, vec![0i64; count])
+                            }
+                        },
+                        DataType::Int32 => {
+                            if let AnyValue::Int32(i) = template_val {
+                                Series::new(field_name, vec![i; count])
+                            } else {
+                                Series::new(field_name, vec![0i32; count])
+                            }
+                        },
+                        DataType::Int16 => {
+                            // 特殊处理Int16，因为这是maturity_month和maturity_day的类型
+                            if let Ok(i16_col) = template_col.i16() {
+                                if let Some(val) = i16_col.get(0) {
+                                    Series::new(field_name, vec![val; count])
+                                } else {
+                                    Series::new(field_name, vec![0i16; count])
+                                }
+                            } else {
+                                // 如果无法转换为i16列，根据字段名使用默认值
+                                match field_name.as_str() {
+                                    "maturity_month" => Series::new(field_name, vec![1i16; count]),
+                                    "maturity_day" => Series::new(field_name, vec![1i16; count]),
+                                    _ => Series::new(field_name, vec![0i16; count]),
+                                }
+                            }
+                        },
+                        DataType::Int8 => {
+                            if let AnyValue::Int8(i) = template_val {
+                                Series::new(field_name, vec![i; count])
+                            } else {
+                                Series::new(field_name, vec![0i8; count])
+                            }
+                        },
+                        DataType::Boolean => {
+                            if let AnyValue::Boolean(b) = template_val {
+                                Series::new(field_name, vec![b; count])
+                            } else {
+                                Series::new(field_name, vec![false; count])
+                            }
+                        },
+                        DataType::Null => Series::new_null(field_name, count),
+                        DataType::Decimal(_, _) => {
+                            // 处理Decimal类型
+                            template_col.slice(0, 1).extend_constant(template_val, count - 1).unwrap_or_else(|_| {
+                                eprintln!("警告: 无法扩展Decimal类型字段 '{}', 使用空值", field_name);
+                                Series::new_null(field_name, count)
+                            })
+                        },
+                        _ => {
+                            // 对于其他未知类型，尝试提取为f64
+                            if let Ok(f64_val) = template_val.try_extract::<f64>() {
+                                Series::new(field_name, vec![f64_val; count])
+                            } else {
+                                // 根据字段名提供合理的默认值
+                                match field_name.as_str() {
+                                    "maturity_month" | "maturity_day" => {
+                                        Series::new(field_name, vec![1i16; count])
+                                    },
+                                    "bid_volume_1" | "ask_volume_1" => {
+                                        Series::new(field_name, vec![0u32; count])
+                                    },
+                                    "bid_price_1" | "ask_price_1" | "mid_price" | "vwap" => {
+                                        Series::new(field_name, vec![0.0f64; count])
+                                    },
+                                    _ => {
+                                        eprintln!("警告: 字段 '{}' 类型 {:?} 无法处理，使用空值", field_name, col_dtype);
+                                        Series::new_null(field_name, count)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            series_vec.push(series);
+        }
+
+        DataFrame::new(series_vec)?
+    } else {
+        DataFrame::empty()
+    };
+
+    // 第三步：合并现有数据和空bar数据
+    let final_result = if existing_rows_df.height() > 0 && empty_bars_df.height() > 0 {
+        existing_rows_df.vstack(&empty_bars_df)?
+    } else if existing_rows_df.height() > 0 {
+        existing_rows_df
+    } else {
+        empty_bars_df
+    };
+
+    // 最终排序
+    let mut final_result = final_result.sort(["trade_time"], SortMultipleOptions::default())?;
+
+    // 找到第一个有成交的bar，将其prev_close也设为NULL
+    let volume_col = final_result.column("volume")?;
+    let mut first_trade_idx: Option<usize> = None;
+    for i in 0..volume_col.len() {
+        if let AnyValue::UInt32(vol) = volume_col.get(i)? {
+            if vol > 0 {
+                first_trade_idx = Some(i);
+                break;
+            }
+        }
+    }
+
+    if let Some(idx) = first_trade_idx {
+        // 将第一个有成交bar的prev_close设为NULL
+        let mut all_columns = Vec::new();
+
+        for (col_name, _) in final_result.schema().iter() {
+            if col_name == "prev_close" {
+                // 替换prev_close列
+                let prev_close_col = final_result.column("prev_close")?;
+                let mut prev_close_values: Vec<Option<f64>> = Vec::new();
+
+                for i in 0..prev_close_col.len() {
+                    if i == idx {
+                        prev_close_values.push(None); // 第一个有成交bar的prev_close设为NULL
+                    } else if let AnyValue::Float64(val) = prev_close_col.get(i)? {
+                        prev_close_values.push(Some(val));
+                    } else {
+                        prev_close_values.push(None); // 保持原有的NULL值
+                    }
+                }
+
+                all_columns.push(Series::new("prev_close", prev_close_values));
+            } else if col_name == "log_return" {
+                // 同时处理log_return列：如果是第一个有成交bar，log_return设为NULL；同时将所有NaN转为NULL
+                let log_return_col = final_result.column("log_return")?;
+                let mut log_return_values: Vec<Option<f64>> = Vec::new();
+
+                for i in 0..log_return_col.len() {
+                    if i == idx {
+                        log_return_values.push(None); // 第一个有成交bar的log_return设为NULL
+                    } else if let AnyValue::Float64(val) = log_return_col.get(i)? {
+                        if val.is_nan() {
+                            log_return_values.push(None); // 将NaN转换为NULL
+                        } else {
+                            log_return_values.push(Some(val));
+                        }
+                    } else {
+                        log_return_values.push(None); // 保持原有的NULL值
+                    }
+                }
+
+                all_columns.push(Series::new("log_return", log_return_values));
+            } else {
+                // 其他列保持不变
+                all_columns.push(final_result.column(col_name)?.clone());
+            }
+        }
+
+        final_result = DataFrame::new(all_columns)?;
+    }
+
+    Ok(final_result)
 }

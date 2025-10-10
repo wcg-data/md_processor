@@ -1,1 +1,0 @@
-use md_processor::parquet_processor::process_parquet_optimized; fn main() { let _ = process_parquet_optimized("/data/future_data/dongzheng_data/full_tick/wr1903.parquet", "/data/future_data/dongzheng_data/full_bar_1min/wr1903_1min.parquet"); }
