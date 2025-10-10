@@ -210,10 +210,9 @@ fn create_minute_windows(mut df: DataFrame) -> anyhow::Result<DataFrame> {
                         NaiveDateTime::from_timestamp_millis(v)
                             .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
                     };
-                    // 向上取整：floor + 1分钟（与on_tick的align_to_bar_minute保持一致）
+                    // 向下取整到分钟（与on_tick的floor_to_1min保持一致，用于窗口划分）
                     let truncated = naive.with_second(0).unwrap().with_nanosecond(0).unwrap();
-                    let aligned = truncated + chrono::Duration::minutes(1);
-                    aligned.format("%Y-%m-%d %H:%M:00").to_string()
+                    truncated.format("%Y-%m-%d %H:%M:00").to_string()
                 },
                 _ => String::new(),
             }
@@ -235,7 +234,7 @@ fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String
     let comd = df.column("comd")?.get(0).unwrap().to_string().replace("\"", "");
     let exchange = df.column("exchange")?.get(0).unwrap().to_string().replace("\"", "");
     
-    let grouped_df = df.lazy()
+    let mut grouped_df = df.lazy()
         .sort(["trade_time"], SortMultipleOptions::default()) // 确保先按时间排序
         .group_by([col("minute_window")])
         .agg([
@@ -264,6 +263,26 @@ fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String
         ])
         .sort(["trade_time"], SortMultipleOptions::default()) // 确保结果按时间排序
         .collect()?;
+
+    // 调整 trade_time: floor + 1 分钟（与on_tick的align_to_bar_minute输出格式保持一致）
+    let trade_time_col = grouped_df.column("trade_time")?;
+    let aligned_times: Vec<String> = (0..grouped_df.height())
+        .map(|i| {
+            match trade_time_col.get(i).unwrap_or(AnyValue::Null) {
+                AnyValue::String(s) => {
+                    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                        let aligned = dt + chrono::Duration::minutes(1);
+                        aligned.format("%Y-%m-%d %H:%M:%S").to_string()
+                    } else {
+                        s.to_string()
+                    }
+                },
+                _ => String::new(),
+            }
+        })
+        .collect();
+
+    grouped_df = grouped_df.with_column(Series::new("trade_time", aligned_times))?.clone();
 
     Ok((grouped_df, contract, comd, exchange))
 }
@@ -299,8 +318,9 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
                 .alias("turnover"),
             
             // 计算open_interest_diff
+            // 第一个bar（prev为NULL）时，使用last_open_interest作为oi_diff（与on_tick保持一致）
             (col("last_open_interest").cast(DataType::Int64) - col("prev_open_interest").cast(DataType::Int64))
-                .fill_null(0)
+                .fill_null(col("last_open_interest").cast(DataType::Int64))
                 .cast(DataType::Int32)
                 .alias("open_interest_diff"),
         ])

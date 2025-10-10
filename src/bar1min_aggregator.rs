@@ -131,9 +131,22 @@ impl Bar1MinAggregator {
         // 根据是否有上一个bar，分别处理volume/turnover/oi_diff计算
         let (volume, turnover, oi_diff, prev_close) = if let Some(prev) = self.prev_last_tick {
             // 有上一个bar：计算差分
+            // 特殊处理累计值重置：如果 last < prev，说明累计值被重置（交易时段切换），直接使用当前累计值
+            let vol = if last_tick.volume < prev.volume {
+                last_tick.volume  // 累计值重置，直接使用当前累计值
+            } else {
+                last_tick.volume.saturating_sub(prev.volume)  // 正常差分
+            };
+
+            let turn = if last_tick.turnover < prev.turnover {
+                last_tick.turnover  // 累计值重置，直接使用当前累计值
+            } else {
+                (last_tick.turnover - prev.turnover).max(0.0)  // 正常差分
+            };
+
             (
-                last_tick.volume.saturating_sub(prev.volume),
-                (last_tick.turnover - prev.turnover).max(0.0),
+                vol,
+                turn,
                 last_tick.open_interest.wrapping_sub(prev.open_interest) as i32,
                 prev.close
             )
