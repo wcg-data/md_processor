@@ -905,10 +905,51 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
     // 1. 读取和过滤数据
     let df = read_tick_from_parquet(&parquet_path)?;
 
-    // 2. 创建分钟窗口
+    // 2. 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
+    // 与on_tick的validate_tick保持一致
+    let df = df.lazy()
+        .with_columns([
+            // 将bid_price_1=0转为NaN，bid_volume_1也设为0
+            when(col("bid_price_1").eq(lit(0.0)))
+                .then(lit(f64::NAN))
+                .otherwise(col("bid_price_1"))
+                .alias("bid_price_1_cleaned"),
+            when(col("ask_price_1").eq(lit(0.0)))
+                .then(lit(f64::NAN))
+                .otherwise(col("ask_price_1"))
+                .alias("ask_price_1_cleaned"),
+        ])
+        .with_columns([
+            // 根据清理后的价格字段判断，如果是NaN则volume设为0
+            when(col("bid_price_1_cleaned").is_nan())
+                .then(lit(0u32))
+                .otherwise(col("bid_volume_1"))
+                .alias("bid_volume_1_cleaned"),
+            when(col("ask_price_1_cleaned").is_nan())
+                .then(lit(0u32))
+                .otherwise(col("ask_volume_1"))
+                .alias("ask_volume_1_cleaned"),
+        ])
+        .with_columns([
+            // 重命名回原始字段名
+            col("bid_price_1_cleaned").alias("bid_price_1"),
+            col("ask_price_1_cleaned").alias("ask_price_1"),
+            col("bid_volume_1_cleaned").alias("bid_volume_1"),
+            col("ask_volume_1_cleaned").alias("ask_volume_1"),
+        ])
+        .select([
+            // 保留所有原始字段，排除临时清理字段
+            col("contract"), col("comd"), col("exchange"), col("date"), col("trade_time"),
+            col("open"), col("high"), col("low"), col("close"), col("pre_settle"),
+            col("volume"), col("turnover"), col("open_interest"),
+            col("bid_price_1"), col("bid_volume_1"), col("ask_price_1"), col("ask_volume_1"), col("mid_price"),
+        ])
+        .collect()?;
+
+    // 3. 创建分钟窗口
     let df_with_minute = create_minute_windows(df)?;
 
-    // 3. 执行分组聚合（向量化），提取常量字段
+    // 4. 执行分组聚合（向量化），提取常量字段
     let (grouped_df, contract, comd, exchange) = perform_group_aggregation(df_with_minute)?;
     
     // 4. 执行跨窗口计算（向量化）

@@ -75,3 +75,15 @@ cargo test
 - 性能关键路径避免内存分配
 - 使用原子操作保证线程安全
 - 数据结构必须保持 C++ 兼容性（用于跨进程通信）
+
+## 重要文档
+
+### 数据过滤规则
+@docs/validate_tick_过滤规则.md - validate_tick 函数的详细过滤规则文档
+- 记录所有启用和禁用的过滤规则
+- 说明 on_tick 和 on_batch 的一致性保证
+- 提供过滤示例和调试建议
+
+### 数据对比工具
+@/root/project/md_toolkit/tools/validators/compare_bar_processors.py - 对比 on_batch 和 on_tick 处理结果
+@/root/project/md_toolkit/tools/validators/README_对比工具.md - 对比工具使用指南

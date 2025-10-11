@@ -245,15 +245,16 @@ impl Bar1MinAggregator {
             return false;
         }
 
-        // // 清理bid/ask为0的情况：将0值设为NaN（用于后续mid_price计算）
-        // if tick.bid_price_1 == 0.0 {
-        //     tick.bid_price_1 = f64::NAN;
-        //     tick.bid_volume_1 = 0;
-        // }
-        // if tick.ask_price_1 == 0.0 {
-        //     tick.ask_price_1 = f64::NAN;
-        //     tick.ask_volume_1 = 0;
-        // }
+        // 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
+        // 这样在读取时会正确识别为空值，而不是有效的0价格
+        if tick.bid_price_1 == 0.0 {
+            tick.bid_price_1 = f64::NAN;
+            tick.bid_volume_1 = 0;
+        }
+        if tick.ask_price_1 == 0.0 {
+            tick.ask_price_1 = f64::NAN;
+            tick.ask_volume_1 = 0;
+        }
 
         // if tick.mid_price < 0.0 { return false; }
 
