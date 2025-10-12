@@ -946,16 +946,29 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
         ])
         .collect()?;
 
-    // 3. 创建分钟窗口
+    // 3. 重新计算mid_price：只有bid和ask都有效时才计算，否则设为NaN
+    // 修正原始数据中当ask=0时mid_price=bid/2的错误逻辑
+    let df = df.lazy()
+        .with_columns([
+            when(
+                col("bid_price_1").is_not_nan().and(col("ask_price_1").is_not_nan())
+            )
+            .then((col("bid_price_1") + col("ask_price_1")) / lit(2.0))
+            .otherwise(lit(f64::NAN))
+            .alias("mid_price")
+        ])
+        .collect()?;
+
+    // 4. 创建分钟窗口
     let df_with_minute = create_minute_windows(df)?;
 
-    // 4. 执行分组聚合（向量化），提取常量字段
+    // 5. 执行分组聚合（向量化），提取常量字段
     let (grouped_df, contract, comd, exchange) = perform_group_aggregation(df_with_minute)?;
-    
-    // 4. 执行跨窗口计算（向量化）
+
+    // 6. 执行跨窗口计算（向量化）
     let mut bars_df = build_bars_vectorized(grouped_df, &contract, &comd, &exchange)?;
 
-    // 4.5. 补全缺失分钟（可选，失败不影响主流程）
+    // 7. 补全缺失分钟（可选，失败不影响主流程）
     let mut bars_df = match fill_missing_minutes(bars_df.clone()) {
         Ok(filled) => filled,
         Err(e) => {
@@ -964,7 +977,7 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
         }
     };
 
-    // 5. 直接写入parquet，避免复杂的数据转换
+    // 8. 直接写入parquet，避免复杂的数据转换
     let file = File::create(output_parquet_path)?;
     ParquetWriter::new(file)
         .with_compression(ParquetCompression::Zstd(None))

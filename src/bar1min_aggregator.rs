@@ -256,18 +256,13 @@ impl Bar1MinAggregator {
             tick.ask_volume_1 = 0;
         }
 
-        // if tick.mid_price < 0.0 { return false; }
-
-        // // 重新计算mid_price（此时bid/ask为0已被转为NaN）
-        // if tick.bid_price_1.is_nan() && tick.ask_price_1.is_nan() {
-        //     tick.mid_price = f64::NAN;
-        // } else if tick.bid_price_1.is_nan() {
-        //     tick.mid_price = tick.ask_price_1;
-        // } else if tick.ask_price_1.is_nan() {
-        //     tick.mid_price = tick.bid_price_1;
-        // } else {
-        //     tick.mid_price = (tick.bid_price_1 + tick.ask_price_1) / 2.0;
-        // }
+        // 重新计算mid_price：只有bid和ask都有效时才计算，否则设为NaN
+        // 修正原始数据中当ask=0时mid_price=bid/2的错误逻辑
+        if tick.bid_price_1.is_nan() || tick.ask_price_1.is_nan() {
+            tick.mid_price = f64::NAN;
+        } else {
+            tick.mid_price = (tick.bid_price_1 + tick.ask_price_1) / 2.0;
+        }
 
         // ---------- 合理价格区间校验 ----------
         // // 若 open/low/high 都是有效数，则校验它们之间的逻辑关系

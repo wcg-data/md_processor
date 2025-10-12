@@ -164,7 +164,9 @@ if tick.bid_price_1 > 0.0 && tick.ask_price_1 > 0.0 && tick.bid_price_1 > tick.a
 
 ---
 
-### 规则 6: bid/ask 价格清理（0值转为NULL）✨新启用
+### 规则 6: bid/ask 价格清理（0值转为NULL）
+
+
 
 ```rust
 // 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
@@ -228,6 +230,59 @@ let df = df.lazy()
 - bb1710: 前10行中有多个ask_price_1被转为NULL
 - y1701: 无0值，无转换
 - 两个处理器的NULL位置完全一致 ✓
+
+---
+
+### 规则 7: mid_price 重新计算 ✨新启用
+
+```rust
+// 重新计算mid_price：只有bid和ask都有效时才计算，否则设为NaN
+// 修正原始数据中当ask=0时mid_price=bid/2的错误逻辑
+if tick.bid_price_1.is_nan() || tick.ask_price_1.is_nan() {
+    tick.mid_price = f64::NAN;
+} else {
+    tick.mid_price = (tick.bid_price_1 + tick.ask_price_1) / 2.0;
+}
+```
+
+**目的**: 修正原始tick数据中的错误mid_price计算（当ask=0时原数据有mid_price=bid/2的错误）
+
+**计算逻辑**:
+- 只有当 `bid_price_1` 和 `ask_price_1` **都不是NaN** 时，计算 `mid_price = (bid + ask) / 2`
+- 否则，`mid_price` 设为 `NaN`（Parquet存储为NULL）
+
+**重要说明**:
+- 此步骤在规则6（bid/ask价格清理）**之后**执行
+- 因此0价格已被转为NaN，mid_price会正确处理
+
+**示例**:
+| bid_price_1 | ask_price_1 | 原始mid_price | 重新计算后mid_price | 说明 |
+|-------------|-------------|--------------|-------------------|------|
+| 100.5 | 100.6 | 100.55 | 100.55 | 正常计算 |
+| NaN (原0) | 100.6 | 50.25（错误） | NaN (NULL) | bid为空，设为NULL ✓ |
+| 100.5 | NaN (原0) | 50.25（错误） | NaN (NULL) | ask为空，设为NULL ✓ |
+| NaN | NaN | NaN | NaN (NULL) | 两者都为空 |
+
+**on_batch等价实现**:
+```rust
+// 在bid/ask清理之后添加此步骤
+let df = df.lazy()
+    .with_columns([
+        when(
+            col("bid_price_1").is_not_nan().and(col("ask_price_1").is_not_nan())
+        )
+        .then((col("bid_price_1") + col("ask_price_1")) / lit(2.0))
+        .otherwise(lit(f64::NAN))
+        .alias("mid_price")
+    ])
+    .collect()?;
+```
+
+**验证结果** (bb1710):
+- ask_price_1=NaN 的行数: 5,137
+- 修复前: 5,137 行的 mid_price = bid_price_1 / 2 (错误)
+- 修复后: 5,137 行的 mid_price = NaN ✓
+- on_batch 和 on_tick 结果完全一致 ✓
 
 ---
 
@@ -484,13 +539,14 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 当前 `validate_tick` 采用**最小化过滤 + 数据清理**策略：
 
-✅ **启用规则** (6个):
+✅ **启用规则** (7个):
 1. close 价格有效性
 2. 基础字段非空
 3. turnover 非负
 4. bid/ask 价格有效性
 5. bid <= ask（条件性）
-6. bid/ask 价格清理（0值转为NULL）✨新增
+6. bid/ask 价格清理（0值转为NULL）
+7. mid_price 重新计算 ✨新增
 
 ❌ **禁用规则** (7个):
 - 避免误过滤有效数据
@@ -501,5 +557,6 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 - ✅ 过滤掉明显无效的数据
 - ✅ 保留所有可能有效的数据
 - ✅ 正确表达NULL语义（0价格 → NULL）
+- ✅ 修正原始数据的mid_price错误 ✨新增
 - ✅ 流式和批量处理完全一致
 - ✅ 高性能处理（无昂贵操作）

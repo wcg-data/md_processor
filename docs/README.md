@@ -64,14 +64,15 @@ code /root/project/md_processor/docs/validate_tick_过滤规则.md
 
 ## 🔍 快速参考
 
-### 当前启用的 6 个过滤规则
+### 当前启用的 7 个过滤规则
 
 1. ✅ **close 价格有效性** - 必须 > 0 且有限
 2. ✅ **字段非空检查** - comd, contract, trade_time 不为空
 3. ✅ **turnover 非负** - 成交额 >= 0
 4. ✅ **bid/ask 有效性** - 价格 >= 0 且有限（允许0）
 5. ✅ **bid <= ask（条件性）** - 仅当两者都 > 0 时检查
-6. ✅ **bid/ask 价格清理** - 将0值转为NULL ✨新增
+6. ✅ **bid/ask 价格清理** - 将0值转为NULL
+7. ✅ **mid_price 重新计算** - 只有bid和ask都有效时才计算 ✨新增
 
 ### 已禁用的 7 个规则（避免误过滤）
 
