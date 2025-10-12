@@ -235,9 +235,9 @@ impl Bar1MinAggregator {
         if tick.turnover < 0.0 { return false; }
 
         // bid/ask价格检查 - 与on_batch保持一致
-        // 过滤掉bid<0或ask<0的tick，但允许bid=0和ask=0
-        if tick.bid_price_1 < 0.0 || !tick.bid_price_1.is_finite() { return false; }
-        if tick.ask_price_1 < 0.0 || !tick.ask_price_1.is_finite() { return false; }
+        // 过滤掉bid<0或infinite的tick，但允许bid=0、ask=0以及NaN
+        if tick.bid_price_1 < 0.0 || tick.bid_price_1.is_infinite() { return false; }
+        if tick.ask_price_1 < 0.0 || tick.ask_price_1.is_infinite() { return false; }
 
         // bid <= ask 检查：只在bid和ask都>0时才要求bid<=ask（与on_batch保持一致）
         // 如果bid=0或ask=0，则跳过检查；只有当两者都>0时才要求bid<=ask
@@ -245,13 +245,13 @@ impl Bar1MinAggregator {
             return false;
         }
 
-        // 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
-        // 这样在读取时会正确识别为空值，而不是有效的0价格
-        if tick.bid_price_1 == 0.0 {
+        // 清理bid/ask为0或NaN的情况：将价格设为NaN，volume设为0（Parquet会存储为NULL）
+        // 这样在读取时会正确识别为空值，统一表示"无买/卖盘"
+        if tick.bid_price_1 == 0.0 || tick.bid_price_1.is_nan() {
             tick.bid_price_1 = f64::NAN;
             tick.bid_volume_1 = 0;
         }
-        if tick.ask_price_1 == 0.0 {
+        if tick.ask_price_1 == 0.0 || tick.ask_price_1.is_nan() {
             tick.ask_price_1 = f64::NAN;
             tick.ask_volume_1 = 0;
         }

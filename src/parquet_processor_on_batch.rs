@@ -96,9 +96,11 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
                 .and(col("turnover").is_not_null())
                 .and(col("turnover").gt_eq(lit(0.0)))  // turnover >= 0
                 .and(col("bid_price_1").is_not_null())
-                .and(col("bid_price_1").gt_eq(lit(0.0)))  // bid >= 0（允许0）
+                .and(col("bid_price_1").gt_eq(lit(0.0)))  // bid >= 0（允许0和NaN）
+                .and((col("bid_price_1").is_nan()).or(col("bid_price_1").is_finite()))  // 允许NaN，拒绝Infinity
                 .and(col("ask_price_1").is_not_null())
-                .and(col("ask_price_1").gt_eq(lit(0.0)))  // ask >= 0（允许0）
+                .and(col("ask_price_1").gt_eq(lit(0.0)))  // ask >= 0（允许0和NaN）
+                .and((col("ask_price_1").is_nan()).or(col("ask_price_1").is_finite()))  // 允许NaN，拒绝Infinity
                 // bid <= ask 检查：只在bid和ask都>0时才要求bid<=ask（与validate_tick保持一致）
                 // 如果bid=0或ask=0，则跳过检查；只有当两者都>0时才要求bid<=ask
                 .and(
@@ -905,27 +907,25 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
     // 1. 读取和过滤数据
     let df = read_tick_from_parquet(&parquet_path)?;
 
-    // 2. 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
+    // 2. 清理bid/ask为0或NaN的情况：将价格设为NaN，volume设为0（Parquet会存储为NULL）
     // 与on_tick的validate_tick保持一致
     let df = df.lazy()
         .with_columns([
-            // 将bid_price_1=0转为NaN，bid_volume_1也设为0
-            when(col("bid_price_1").eq(lit(0.0)))
+            // 将bid_price_1=0或NaN转为NaN，并将对应的volume设为0
+            when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
                 .then(lit(f64::NAN))
                 .otherwise(col("bid_price_1"))
                 .alias("bid_price_1_cleaned"),
-            when(col("ask_price_1").eq(lit(0.0)))
+            when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
                 .then(lit(f64::NAN))
                 .otherwise(col("ask_price_1"))
                 .alias("ask_price_1_cleaned"),
-        ])
-        .with_columns([
-            // 根据清理后的价格字段判断，如果是NaN则volume设为0
-            when(col("bid_price_1_cleaned").is_nan())
+            // volume也同步设为0
+            when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
                 .then(lit(0u32))
                 .otherwise(col("bid_volume_1"))
                 .alias("bid_volume_1_cleaned"),
-            when(col("ask_price_1_cleaned").is_nan())
+            when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
                 .then(lit(0u32))
                 .otherwise(col("ask_volume_1"))
                 .alias("ask_volume_1_cleaned"),

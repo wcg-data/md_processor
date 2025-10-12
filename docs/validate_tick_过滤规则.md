@@ -102,21 +102,23 @@ if tick.turnover < 0.0 { return false; }
 ### 规则 4: bid/ask 价格有效性检查
 
 ```rust
-if tick.bid_price_1 < 0.0 || !tick.bid_price_1.is_finite() { return false; }
-if tick.ask_price_1 < 0.0 || !tick.ask_price_1.is_finite() { return false; }
+if tick.bid_price_1 < 0.0 || tick.bid_price_1.is_infinite() { return false; }
+if tick.ask_price_1 < 0.0 || tick.ask_price_1.is_infinite() { return false; }
 ```
 
-**目的**: 买卖价格必须非负且有限（允许为 0）
+**目的**: 买卖价格必须非负且非无穷（允许 0 和 NaN）
 
 **过滤条件**:
 - ❌ `bid_price_1 < 0.0` - 买价为负数
-- ❌ `bid_price_1` 为 `NaN` 或 `Infinity`
+- ❌ `bid_price_1` 为 `Infinity`
 - ❌ `ask_price_1 < 0.0` - 卖价为负数
-- ❌ `ask_price_1` 为 `NaN` 或 `Infinity`
+- ❌ `ask_price_1` 为 `Infinity`
 
 **允许情况**:
 - ✅ `bid_price_1 = 0.0` - 允许（无买盘）
 - ✅ `ask_price_1 = 0.0` - 允许（无卖盘）
+- ✅ `bid_price_1 = NaN` - 允许（原始数据中的无买盘）
+- ✅ `ask_price_1 = NaN` - 允许（原始数据中的无卖盘）
 
 **示例**:
 | bid_price_1 | ask_price_1 | 是否通过 | 原因 |
@@ -124,8 +126,11 @@ if tick.ask_price_1 < 0.0 || !tick.ask_price_1.is_finite() { return false; }
 | 100.5 | 100.6 | ✅ | 正常买卖价 |
 | 0.0 | 100.6 | ✅ | 无买盘，允许 |
 | 100.5 | 0.0 | ✅ | 无卖盘，允许 |
+| NaN | 100.6 | ✅ | 原始NaN，允许 |
+| 100.5 | NaN | ✅ | 原始NaN，允许 |
 | -1.0 | 100.6 | ❌ | 买价为负 |
-| 100.5 | NaN | ❌ | 卖价非有限数 |
+| Infinity | 100.6 | ❌ | 买价为无穷 |
+| 100.5 | Infinity | ❌ | 卖价为无穷 |
 
 ---
 
@@ -164,62 +169,60 @@ if tick.bid_price_1 > 0.0 && tick.ask_price_1 > 0.0 && tick.bid_price_1 > tick.a
 
 ---
 
-### 规则 6: bid/ask 价格清理（0值转为NULL）
-
-
+### 规则 6: bid/ask 价格清理（0值或NaN转为NULL，volume清零）
 
 ```rust
-// 清理bid/ask为0的情况：将0值设为NaN（Parquet会存储为NULL）
-// 这样在读取时会正确识别为空值，而不是有效的0价格
-if tick.bid_price_1 == 0.0 {
+// 清理bid/ask为0或NaN的情况：将价格设为NaN，volume设为0（Parquet会存储为NULL）
+// 这样在读取时会正确识别为空值，统一表示"无买/卖盘"
+if tick.bid_price_1 == 0.0 || tick.bid_price_1.is_nan() {
     tick.bid_price_1 = f64::NAN;
     tick.bid_volume_1 = 0;
 }
-if tick.ask_price_1 == 0.0 {
+if tick.ask_price_1 == 0.0 || tick.ask_price_1.is_nan() {
     tick.ask_price_1 = f64::NAN;
     tick.ask_volume_1 = 0;
 }
 ```
 
-**目的**: 将价格为0的bid/ask转换为NULL，正确表达"无买/卖盘"的语义
+**目的**: 统一处理0和NaN两种"无买/卖盘"表示，确保volume也为0
 
 **转换逻辑**:
-- `bid_price_1 = 0.0` → `NaN` (Parquet存储为NULL)
-- `bid_volume_1` 也设为 `0`
-- `ask_price_1 = 0.0` → `NaN` (Parquet存储为NULL)
-- `ask_volume_1` 也设为 `0`
+- `bid_price_1 = 0.0` 或 `NaN` → `NaN` (Parquet存储为NULL)
+- 对应的 `bid_volume_1` 设为 `0`
+- `ask_price_1 = 0.0` 或 `NaN` → `NaN` (Parquet存储为NULL)
+- 对应的 `ask_volume_1` 设为 `0`
 
-**重要**: NaN在Parquet中会被存储为NULL，读取时也会正确识别为NULL
+**重要**:
+- NaN在Parquet中会被存储为NULL，读取时也会正确识别为NULL
+- 原始数据中的NaN也需要清理对应的volume
 
 **示例**:
-| 原始bid_price_1 | 原始ask_price_1 | 清理后bid_price_1 | 清理后ask_price_1 | 说明 |
-|----------------|----------------|------------------|------------------|------|
-| 100.5 | 100.6 | 100.5 | 100.6 | 正常，不修改 |
-| 0.0 | 100.6 | NaN (NULL) | 100.6 | 无买盘 |
-| 100.5 | 0.0 | 100.5 | NaN (NULL) | 无卖盘 |
-| 0.0 | 0.0 | NaN (NULL) | NaN (NULL) | 无买卖盘 |
+| 原始bid_price_1 | 原始bid_volume_1 | 清理后bid_price_1 | 清理后bid_volume_1 | 说明 |
+|----------------|-----------------|------------------|-------------------|------|
+| 100.5 | 10 | 100.5 | 10 | 正常，不修改 |
+| 0.0 | 5 | NaN (NULL) | 0 | 价格0，volume清零 |
+| NaN | 5 | NaN (NULL) | 0 | 原始NaN，volume清零 |
+| 100.5 | 0 | 100.5 | 0 | 价格有效，volume保持 |
 
 **on_batch等价实现**:
 ```rust
 let df = df.lazy()
     .with_columns([
-        // 将bid_price_1=0转为NaN
-        when(col("bid_price_1").eq(lit(0.0)))
+        // 将bid_price_1=0或NaN转为NaN，并将对应的volume设为0
+        when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
             .then(lit(f64::NAN))
             .otherwise(col("bid_price_1"))
             .alias("bid_price_1_cleaned"),
-        when(col("ask_price_1").eq(lit(0.0)))
+        when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
             .then(lit(f64::NAN))
             .otherwise(col("ask_price_1"))
             .alias("ask_price_1_cleaned"),
-    ])
-    .with_columns([
-        // volume也设为0
-        when(col("bid_price_1_cleaned").is_nan())
+        // volume也同步设为0
+        when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
             .then(lit(0u32))
             .otherwise(col("bid_volume_1"))
             .alias("bid_volume_1_cleaned"),
-        when(col("ask_price_1_cleaned").is_nan())
+        when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
             .then(lit(0u32))
             .otherwise(col("ask_volume_1"))
             .alias("ask_volume_1_cleaned"),
