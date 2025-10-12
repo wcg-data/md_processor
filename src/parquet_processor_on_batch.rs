@@ -81,10 +81,12 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
     // println!("数据列名: {:?}", raw_df.get_column_names());
     
     // 基于 validate_tick 逻辑的高性能向量化过滤
+    // 注意: 不读取原始 tick 数据的 open/high/low 字段，因为这些字段不可靠且未使用
+    // OHLC 会在聚合时基于 close 价格重新计算
     let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
         .select([
             col("contract"), col("comd"), col("exchange"), col("date"), col("trade_time"),
-            col("open"), col("high"), col("low"), col("close"), col("pre_settle"), 
+            col("close"), col("pre_settle"),
             col("volume"), col("turnover"), col("open_interest"),
             col("bid_price_1"), col("bid_volume_1"), col("ask_price_1"), col("ask_volume_1"), col("mid_price"),
         ])
@@ -940,7 +942,7 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
         .select([
             // 保留所有原始字段，排除临时清理字段
             col("contract"), col("comd"), col("exchange"), col("date"), col("trade_time"),
-            col("open"), col("high"), col("low"), col("close"), col("pre_settle"),
+            col("close"), col("pre_settle"),
             col("volume"), col("turnover"), col("open_interest"),
             col("bid_price_1"), col("bid_volume_1"), col("ask_price_1"), col("ask_volume_1"), col("mid_price"),
         ])

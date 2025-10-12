@@ -315,28 +315,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 C: mid_price 检查和重新计算
-
-```rust
-// if tick.mid_price < 0.0 { return false; }
-//
-// // 重新计算mid_price
-// if tick.bid_price_1.is_nan() && tick.ask_price_1.is_nan() {
-//     tick.mid_price = f64::NAN;
-// } else if tick.bid_price_1.is_nan() {
-//     tick.mid_price = tick.ask_price_1;
-// } else if tick.ask_price_1.is_nan() {
-//     tick.mid_price = tick.bid_price_1;
-// } else {
-//     tick.mid_price = (tick.bid_price_1 + tick.ask_price_1) / 2.0;
-// }
-```
-
-**禁用原因**: mid_price 计算逻辑被移除，避免数据修改
-
----
-
-### ❌ 规则 D: 价格区间逻辑检查
+### ❌ 规则 C: 价格区间逻辑检查
 
 ```rust
 // if tick.open.is_finite() && tick.low.is_finite() && tick.high.is_finite() {
@@ -354,7 +333,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 E: volume 和 turnover 一致性检查
+### ❌ 规则 D: volume 和 turnover 一致性检查
 
 ```rust
 // if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
@@ -369,7 +348,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 F: 成交均价区间检查
+### ❌ 规则 E: 成交均价区间检查
 
 ```rust
 // if tick.volume > 0
@@ -388,7 +367,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 G: 交易时段检查
+### ❌ 规则 F: 交易时段检查
 
 ```rust
 // let dt = match Self::parse_datetime_from_tick(tick) {
@@ -432,9 +411,11 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
         // 规则 4: bid/ask 有效性
             .and(col("bid_price_1").is_not_null())
-            .and(col("bid_price_1").gt_eq(lit(0.0)))  // bid >= 0（允许0）
+            .and(col("bid_price_1").gt_eq(lit(0.0)))  // bid >= 0（允许0和NaN）
+            .and((col("bid_price_1").is_nan()).or(col("bid_price_1").is_finite()))  // 允许NaN，拒绝Infinity
             .and(col("ask_price_1").is_not_null())
-            .and(col("ask_price_1").gt_eq(lit(0.0)))  // ask >= 0（允许0）
+            .and(col("ask_price_1").gt_eq(lit(0.0)))  // ask >= 0（允许0和NaN）
+            .and((col("ask_price_1").is_nan()).or(col("ask_price_1").is_finite()))  // 允许NaN，拒绝Infinity
 
         // 规则 5: bid <= ask（条件性）
             .and(
@@ -456,7 +437,7 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 | close 无效 | 0 | 0.00% |
 | 字段为空 | 0 | 0.00% |
 | turnover < 0 | 0 | 0.00% |
-| bid/ask < 0 或非有限数 | 0 | 0.00% |
+| bid/ask < 0 或 Infinity | 0 | 0.00% |
 | bid > ask（都>0时） | 0 | 0.00% |
 | **总计** | **0** | **0.00%** |
 
@@ -520,16 +501,23 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 版本历史
 
-### v1.0 (当前版本)
-- 启用 5 个基础过滤规则
-- 禁用 8 个严格规则
+### v1.2 (当前版本) - 2025-01
+- **规则4更新**: 将 `!is_finite()` 改为 `is_infinite()`，允许 NaN 通过
+- **规则6更新**: 增加 NaN 处理，统一清理 0 和 NaN 价格对应的 volume
+- **规则7新增**: mid_price 重新计算逻辑
+- 启用 7 个过滤规则（新增2个）
+- 禁用 7 个严格规则
 - 与 on_batch 保持完全一致
 
-### 历史变更
-- 2024-10: 移除交易时段检查（性能优化）
-- 2024-10: 移除 volume/turnover 一致性检查（避免误过滤）
-- 2024-10: 移除 open/high/low 检查（字段不可靠）
-- 2024-10: 简化 bid/ask 处理（保留 0 值，不转为 NaN）
+### v1.1 - 2024-12
+- **规则6新增**: bid/ask 价格清理（0值转为NULL）
+- 启用 6 个基础过滤规则
+
+### v1.0 - 2024-10
+- 启用 5 个基础过滤规则
+- 移除交易时段检查（性能优化）
+- 移除 volume/turnover 一致性检查（避免误过滤）
+- 移除 open/high/low 检查（字段不可靠）
 
 ## 相关文件
 
@@ -546,10 +534,10 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 1. close 价格有效性
 2. 基础字段非空
 3. turnover 非负
-4. bid/ask 价格有效性
+4. bid/ask 价格有效性（拒绝负数和Infinity，允许0和NaN）
 5. bid <= ask（条件性）
-6. bid/ask 价格清理（0值转为NULL）
-7. mid_price 重新计算 ✨新增
+6. bid/ask 价格清理（0值或NaN转为NULL，volume清零）
+7. mid_price 重新计算
 
 ❌ **禁用规则** (7个):
 - 避免误过滤有效数据
@@ -557,9 +545,10 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 - 与 on_batch 保持一致
 
 这种策略确保：
-- ✅ 过滤掉明显无效的数据
-- ✅ 保留所有可能有效的数据
-- ✅ 正确表达NULL语义（0价格 → NULL）
-- ✅ 修正原始数据的mid_price错误 ✨新增
+- ✅ 过滤掉明显无效的数据（负数、Infinity）
+- ✅ 保留所有可能有效的数据（允许0和NaN）
+- ✅ 正确表达NULL语义（0价格或NaN → NULL）
+- ✅ 确保volume一致性（无效价格对应的volume清零）
+- ✅ 修正原始数据的mid_price错误
 - ✅ 流式和批量处理完全一致
 - ✅ 高性能处理（无昂贵操作）
