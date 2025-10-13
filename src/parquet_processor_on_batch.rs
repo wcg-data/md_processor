@@ -128,68 +128,68 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
     
     // println!("基础过滤后数据行数: {}", result_df.height());
 
-    // // 交易时间过滤（优化后的逐行过滤） - 暂时注释，与on_tick保持一致
-    // // 先获取当前品种代码（假设整个文件都是同一品种）
-    // let current_comd = match result_df.column("comd")?.get(0)? {
-    //     AnyValue::String(v) => v.to_string(),
-    //     _ => return Err(anyhow::anyhow!("无法获取品种代码")),
-    // };
+    // 交易时间过滤（优化后的逐行过滤）
+    // 先获取当前品种代码（假设整个文件都是同一品种）
+    let current_comd = match result_df.column("comd")?.get(0)? {
+        AnyValue::String(v) => v.to_string(),
+        _ => return Err(anyhow::anyhow!("无法获取品种代码")),
+    };
 
-    // // 获取该品种的交易时间范围
-    // let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
+    // 获取该品种的交易时间范围
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
 
-    // if !trading_ranges.is_empty() {
-    //     // 快速批量过滤：使用向量化操作提取时间列，然后批量检查
-    //     let mut valid_indices = Vec::new();
-    //     let trade_time_col = result_df.column("trade_time")?;
+    if !trading_ranges.is_empty() {
+        // 快速批量过滤：使用向量化操作提取时间列，然后批量检查
+        let mut valid_indices = Vec::new();
+        let trade_time_col = result_df.column("trade_time")?;
 
-    //     for i in 0..result_df.height() {
-    //         if let Ok(any_val) = trade_time_col.get(i) {
-    //             let time_part = match any_val {
-    //                 AnyValue::String(v) => {
-    //                     if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f")
-    //                         .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S")) {
-    //                         naive_dt.time()
-    //                     } else {
-    //                         continue;
-    //                     }
-    //                 },
-    //                 AnyValue::Datetime(v, _, _) => {
-    //                     let naive = if v > 1e15 as i64 {
-    //                         NaiveDateTime::from_timestamp_micros(v)
-    //                             .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
-    //                     } else {
-    //                         NaiveDateTime::from_timestamp_millis(v)
-    //                             .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
-    //                     };
-    //                     naive.time()
-    //                 },
-    //                 _ => continue,
-    //             };
+        for i in 0..result_df.height() {
+            if let Ok(any_val) = trade_time_col.get(i) {
+                let time_part = match any_val {
+                    AnyValue::String(v) => {
+                        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f")
+                            .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S")) {
+                            naive_dt.time()
+                        } else {
+                            continue;
+                        }
+                    },
+                    AnyValue::Datetime(v, _, _) => {
+                        let naive = if v > 1e15 as i64 {
+                            NaiveDateTime::from_timestamp_micros(v)
+                                .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                        } else {
+                            NaiveDateTime::from_timestamp_millis(v)
+                                .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+                        };
+                        naive.time()
+                    },
+                    _ => continue,
+                };
 
-    //             // 检查时间是否在任一交易时段内
-    //             let is_valid = trading_ranges.iter().any(|(start, end)| {
-    //                 time_part >= *start && time_part <= *end
-    //             });
+                // 检查时间是否在任一交易时段内
+                let is_valid = trading_ranges.iter().any(|(start, end)| {
+                    time_part >= *start && time_part <= *end
+                });
 
-    //             if is_valid {
-    //                 valid_indices.push(i as u32);
-    //             }
-    //         }
-    //     }
+                if is_valid {
+                    valid_indices.push(i as u32);
+                }
+            }
+        }
 
-    //     // println!("品种 {} 交易时间过滤后数据行数: {}", current_comd, valid_indices.len());
+        // println!("品种 {} 交易时间过滤后数据行数: {}", current_comd, valid_indices.len());
 
-    //     if valid_indices.is_empty() {
-    //         return Err(anyhow::anyhow!("过滤后数据为空，可能是所有tick都不在 {} 的交易时间内", current_comd));
-    //     }
+        if valid_indices.is_empty() {
+            return Err(anyhow::anyhow!("过滤后数据为空，可能是所有tick都不在 {} 的交易时间内", current_comd));
+        }
 
-    //     // 根据有效索引过滤DataFrame
-    //     let indices_ca = UInt32Chunked::from_vec("", valid_indices);
-    //     result_df = result_df.take(&indices_ca)?;
-    // } else {
-    //     println!("警告: 未找到品种 {} 的交易时间配置，跳过交易时间过滤", current_comd);
-    // }
+        // 根据有效索引过滤DataFrame
+        let indices_ca = UInt32Chunked::from_vec("", valid_indices);
+        result_df = result_df.take(&indices_ca)?;
+    } else {
+        println!("警告: 未找到品种 {} 的交易时间配置，跳过交易时间过滤", current_comd);
+    }
 
     Ok(result_df)
 }

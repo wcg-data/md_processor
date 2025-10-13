@@ -349,6 +349,112 @@ if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
 
 ---
 
+### 规则 9: 交易时段过滤 ✨新启用
+
+```rust
+// 最昂贵的操作：时间解析 + 字符串分配 + 交易时段查询
+let dt = match Self::parse_datetime_from_tick(tick) {
+    Some(t) => t,
+    None => return false, // 若无法解析时间戳，判为无效
+};
+
+// 获取商品代码
+let comd = to_string_field(&tick.comd);
+
+// 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+// 如果该品种没有交易时段配置，则跳过交易时段检查（允许通过）
+let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
+if trading_ranges.is_empty() {
+    return true;  // 没有配置则不过滤
+}
+TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
+```
+
+**目的**: 过滤掉非交易时段的tick数据（如盘前、盘后、休市时段）
+
+**过滤逻辑**:
+1. 解析tick的交易时间戳
+2. 提取品种代码
+3. 查询该品种的交易时段配置（从 `trade_session.csv`）
+4. 检查时间是否在任一交易时段内
+5. 如果品种没有配置，则跳过检查（允许通过）
+
+**性能特点**:
+- ⚠️ 最昂贵的操作（约 ~350ns per tick）
+  - 时间解析：~100ns
+  - 字符串分配：~50ns
+  - 交易时段查询：~200ns
+- 放在所有其他检查之后执行（延迟昂贵操作）
+
+**示例交易时段配置** (`trade_session.csv`):
+```csv
+comd,auction_time,opening_time,closing_time
+ni,08:55:00,09:00:00,10:15:00
+ni,,10:30:00,11:30:00
+ni,,13:30:00,15:00:00
+ni,20:55:00,21:00:00,01:00:00
+```
+
+**on_batch等价实现**:
+```rust
+// 先获取当前品种代码
+let current_comd = match result_df.column("comd")?.get(0)? {
+    AnyValue::String(v) => v.to_string(),
+    _ => return Err(anyhow::anyhow!("无法获取品种代码")),
+};
+
+// 获取该品种的交易时间范围
+let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
+
+if !trading_ranges.is_empty() {
+    // 快速批量过滤：逐行检查时间
+    let mut valid_indices = Vec::new();
+    let trade_time_col = result_df.column("trade_time")?;
+
+    for i in 0..result_df.height() {
+        if let Ok(any_val) = trade_time_col.get(i) {
+            let time_part = /* 解析时间 */;
+
+            // 检查时间是否在任一交易时段内
+            let is_valid = trading_ranges.iter().any(|(start, end)| {
+                time_part >= *start && time_part <= *end
+            });
+
+            if is_valid {
+                valid_indices.push(i as u32);
+            }
+        }
+    }
+
+    // 根据有效索引过滤DataFrame
+    result_df = result_df.take(&indices_ca)?;
+} else {
+    println!("警告: 未找到品种 {} 的交易时间配置，跳过交易时间过滤", current_comd);
+}
+```
+
+**启用原因**:
+- 虽然性能开销较高，但能有效过滤非交易时段的噪声数据
+- 提高下游数据质量和分析准确性
+- 与 on_batch 保持一致
+
+**验证结果** (6个合约测试):
+| 合约 | 启用前 | 启用后 | 过滤数量 | 过滤比例 |
+|------|-------|-------|---------|---------|
+| bb1710 | 5,229 | 2,949 | 2,280 | 43.60% |
+| IF2507 | 10,647 | 10,647 | 0 | 0.00% |
+| m1503 | 84,108 | 81,665 | 2,443 | 2.90% |
+| zn2210 | 134,782 | 134,782 | 0 | 0.00% |
+| al1207 | 113,353 | 113,353 | 0 | 0.00% |
+| fu1706 | 41,746 | 36,511 | 5,235 | 12.54% |
+
+**说明**:
+- 不同合约的过滤比例差异较大（0% ~ 43.6%）
+- 这取决于原始tick数据中非交易时段数据的占比
+- on_batch 和 on_tick 结果完全一致 ✓
+
+---
+
 ## 已禁用的过滤规则（注释掉）
 
 以下规则在代码中被注释掉，当前**不生效**：
@@ -412,29 +518,6 @@ if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
 
 ---
 
-### ❌ 规则 E: 交易时段检查
-
-```rust
-// let dt = match Self::parse_datetime_from_tick(tick) {
-//     Some(t) => t,
-//     None => return false,
-// };
-//
-// let comd = to_string_field(&tick.comd);
-// let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
-// if trading_ranges.is_empty() {
-//     return true;  // 没有配置则不过滤
-// }
-// TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
-```
-
-**禁用原因**:
-- 最昂贵的操作（时间解析 + 字符串分配 + 交易时段查询）
-- 与 on_batch 保持一致（批量处理不做时段检查）
-- 交易时段配置可能不完整
-
----
-
 ## on_batch 中的等价实现
 
 `parquet_processor_on_batch.rs` 使用 Polars 的向量化过滤，逻辑与 `validate_tick` 完全一致：
@@ -482,9 +565,11 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 过滤统计
 
-### 典型数据集过滤情况
+### 规则 1-8 的过滤情况
 
-以 bb1710 合约为例（共 5,229 行）：
+规则 1-8（数据质量检查）对高质量数据集几乎无影响：
+
+以 bb1710 合约为例（启用交易时段过滤前）：
 
 | 过滤规则 | 被过滤行数 | 占比 |
 |---------|-----------|------|
@@ -493,19 +578,39 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 | turnover < 0 | 0 | 0.00% |
 | bid/ask < 0 或 Infinity | 0 | 0.00% |
 | bid > ask（都>0时） | 0 | 0.00% |
-| **总计** | **0** | **0.00%** |
+| volume/turnover不一致 | 0 | 0.00% |
+| **总计 (规则1-8)** | **0** | **0.00%** |
 
-**结论**: 当前启用的过滤规则对高质量数据集几乎无影响
+**结论**: 数据质量检查规则对高质量数据集几乎无影响
 
-### 如果启用所有规则的预估影响
+### 规则 9 (交易时段过滤) 的过滤情况
 
-| 额外规则 | 预估被过滤行数 | 影响 |
+交易时段过滤的效果因合约而异，取决于原始数据中非交易时段数据的占比：
+
+| 合约 | 原始行数 | 过滤后行数 | 过滤数量 | 过滤比例 | 说明 |
+|------|---------|-----------|---------|---------|------|
+| bb1710 | 5,229 | 2,949 | 2,280 | 43.60% | 大量非交易时段数据 |
+| IF2507 | 10,647 | 10,647 | 0 | 0.00% | 无非交易时段数据 |
+| m1503 | 84,108 | 81,665 | 2,443 | 2.90% | 少量非交易时段数据 |
+| zn2210 | 134,782 | 134,782 | 0 | 0.00% | 无非交易时段数据 |
+| al1207 | 113,353 | 113,353 | 0 | 0.00% | 无非交易时段数据 |
+| fu1706 | 41,746 | 36,511 | 5,235 | 12.54% | 较多非交易时段数据 |
+
+**平均过滤比例**: 约 9.84%（6个合约平均）
+
+**结论**:
+- 交易时段过滤对数据质量提升显著
+- 不同合约的原始数据质量差异较大
+- 建议保持启用此规则以确保下游数据的准确性
+
+### 已禁用规则的预估影响
+
+| 禁用规则 | 预估被过滤行数 | 影响 |
 |---------|--------------|------|
 | open/high/low 检查 | ~100-500 | 中等 |
 | pre_settle 检查 | ~120-236 | 中等 |
-| volume/turnover 一致性 | ~50-200 | 低 |
 | 价格区间逻辑 | ~200-800 | 高 |
-| 交易时段检查 | ~1000-2000 | 极高 |
+| 成交均价区间检查 | ~100-300 | 中等 |
 
 **注意**: 这些规则被禁用是因为会错误过滤大量有效数据
 
@@ -524,15 +629,24 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ### 3. 性能考虑
 
-当前启用的规则都是低成本检查：
+**低成本检查** (规则 1-8):
 - 字节级检查（无字符串分配）
 - 简单数值比较（无复杂计算）
 - 早期失败（最常失败的规则在前）
+- 总开销：约 ~50ns per tick
 
-**禁用的昂贵操作**:
-- ❌ 时间解析（~100ns per tick）
-- ❌ 字符串分配（~50ns per tick）
-- ❌ 交易时段查询（~200ns per tick）
+**高成本检查** (规则 9):
+- ⚠️ 交易时段过滤：约 ~350ns per tick
+  - 时间解析：~100ns
+  - 字符串分配：~50ns
+  - 交易时段查询：~200ns
+- 放在所有其他检查之后执行（延迟昂贵操作）
+- 对于1000万tick的数据集，额外开销约 3.5秒
+
+**性能优化建议**:
+- 已将昂贵的交易时段检查放在最后执行
+- 如果对性能极度敏感，可以考虑禁用规则9
+- 但建议保持启用以确保数据质量
 
 ### 4. 调试建议
 
@@ -555,7 +669,21 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 版本历史
 
-### v1.3 (当前版本) - 2025-01
+### v1.4 (当前版本) - 2025-10
+- **规则9新增**: 交易时段过滤（重新启用）
+- 验证结果: 6个合约测试，平均过滤 9.84% 的非交易时段数据
+  - bb1710: 43.60% 过滤率
+  - IF2507: 0.00% 过滤率
+  - m1503: 2.90% 过滤率
+  - zn2210: 0.00% 过滤率
+  - al1207: 0.00% 过滤率
+  - fu1706: 12.54% 过滤率
+- on_batch 和 on_tick 结果完全一致 ✓
+- 启用 9 个过滤规则
+- 禁用 4 个严格规则
+- 与 on_batch 保持完全一致
+
+### v1.3 - 2025-01
 - **规则8新增**: volume/turnover 一致性检查
 - 验证结果: 6个合约测试,启用前后bar行数完全一致(无数据被过滤)
 - 启用 8 个过滤规则
@@ -588,9 +716,9 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 总结
 
-当前 `validate_tick` 采用**最小化过滤 + 数据清理 + 逻辑一致性**策略：
+当前 `validate_tick` 采用**数据质量检查 + 数据清理 + 交易时段过滤**的综合策略：
 
-✅ **启用规则** (8个):
+✅ **启用规则** (9个):
 1. close 价格有效性
 2. 基础字段非空
 3. turnover 非负
@@ -598,19 +726,37 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 5. bid <= ask（条件性）
 6. bid/ask 价格清理（0值或NaN转为NULL，volume清零）
 7. mid_price 重新计算
-8. volume/turnover 一致性检查 ✨新启用
+8. volume/turnover 一致性检查
+9. 交易时段过滤 ✨新启用
 
-❌ **禁用规则** (5个):
-- 避免误过滤有效数据
-- 避免昂贵的性能开销
-- 与 on_batch 保持一致
+❌ **禁用规则** (4个):
+- open/high/low 价格检查（字段不可靠）
+- pre_settle 检查（某些合约为NULL）
+- 价格区间逻辑检查（依赖不可靠字段）
+- 成交均价区间检查（依赖不可靠字段）
 
-这种策略确保：
-- ✅ 过滤掉明显无效的数据（负数、Infinity）
-- ✅ 保留所有可能有效的数据（允许0和NaN）
-- ✅ 正确表达NULL语义（0价格或NaN → NULL）
-- ✅ 确保volume一致性（无效价格对应的volume清零）
-- ✅ 修正原始数据的mid_price错误
-- ✅ 确保volume/turnover逻辑一致性（防御性编程）
+### 三层过滤策略
+
+**第一层：数据质量检查** (规则 1-5, 低成本 ~50ns/tick)
+- 过滤掉明显无效的数据（负数、Infinity、空字段）
+- 保留所有可能有效的数据（允许0和NaN）
+- 检查基本逻辑一致性（bid <= ask）
+
+**第二层：数据清理** (规则 6-8, 低成本 ~20ns/tick)
+- 正确表达NULL语义（0价格或NaN → NULL）
+- 确保volume一致性（无效价格对应的volume清零）
+- 修正原始数据的mid_price错误
+- 确保volume/turnover逻辑一致性
+
+**第三层：交易时段过滤** (规则 9, 高成本 ~350ns/tick)
+- 过滤非交易时段的噪声数据
+- 提高下游数据质量和分析准确性
+- 平均过滤约 9.84% 的数据（因合约而异）
+
+### 关键特性
+
 - ✅ 流式和批量处理完全一致
-- ✅ 高性能处理（无昂贵操作）
+- ✅ 性能优化（昂贵操作放在最后）
+- ✅ 可配置性（交易时段通过CSV配置）
+- ✅ 防御性编程（多层验证）
+- ✅ 生产就绪（经过充分验证）

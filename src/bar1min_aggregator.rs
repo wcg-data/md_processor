@@ -301,23 +301,21 @@ impl Bar1MinAggregator {
 
         // ---------- 延迟昂贵操作到最后 ----------
         // 最昂贵的操作：时间解析 + 字符串分配 + 交易时段查询
-        // let dt = match Self::parse_datetime_from_tick(tick) {
-        //     Some(t) => t,
-        //     None => return false, // 若无法解析时间戳，判为无效
-        // };
+        let dt = match Self::parse_datetime_from_tick(tick) {
+            Some(t) => t,
+            None => return false, // 若无法解析时间戳，判为无效
+        };
 
-        // // 获取商品代码
-        // let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
+        // 获取商品代码
+        let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
 
-        // // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
-        // // 如果该品种没有交易时段配置，则跳过交易时段检查（允许通过）
-        // let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
-        // if trading_ranges.is_empty() {
-        //     return true;  // 没有配置则不过滤
-        // }
-        // TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
-
-        true  // 暂时注释交易时段检查，与on_batch保持一致
+        // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+        // 如果该品种没有交易时段配置，则跳过交易时段检查（允许通过）
+        let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
+        if trading_ranges.is_empty() {
+            return true;  // 没有配置则不过滤
+        }
+        TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
     }
 
 
