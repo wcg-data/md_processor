@@ -289,6 +289,66 @@ let df = df.lazy()
 
 ---
 
+### 规则 8: volume 和 turnover 一致性检查 ✨新启用
+
+```rust
+// volume和turnover的一致性校验
+// 要求：
+// - volume = 0 时，turnover 必须为 0 或 NaN（表示"无成交"）
+// - volume > 0 时，turnover 必须为正
+if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+    || (tick.volume > 0 && tick.turnover > 0.0)) {
+    return false;
+}
+```
+
+**目的**: 确保成交量和成交额逻辑一致
+
+**允许的组合**:
+- ✅ volume=0 且 turnover=0 (无成交)
+- ✅ volume=0 且 turnover=NaN (无成交,NaN表示)
+- ✅ volume>0 且 turnover>0 (正常成交)
+
+**拒绝的组合**:
+- ❌ volume=0 但 turnover>0 (逻辑矛盾)
+- ❌ volume>0 但 turnover=0 (逻辑矛盾)
+- ❌ volume>0 但 turnover<0 (已被规则3拦截)
+
+**示例**:
+| volume | turnover | 是否通过 | 原因 |
+|--------|----------|---------|------|
+| 0 | 0.0 | ✅ | 无成交 |
+| 0 | NaN | ✅ | 无成交(NaN) |
+| 100 | 1000000.0 | ✅ | 正常成交 |
+| 0 | 1000.0 | ❌ | volume=0但有成交额 |
+| 100 | 0.0 | ❌ | 有成交量但无成交额 |
+
+**on_batch等价实现**:
+```rust
+// volume和turnover一致性校验
+.and(
+    // (volume = 0 且 turnover = 0/NaN) 或 (volume > 0 且 turnover > 0)
+    (col("volume").eq(lit(0)).and(
+        col("turnover").eq(lit(0.0)).or(col("turnover").is_nan())
+    ))
+    .or(col("volume").gt(lit(0)).and(col("turnover").gt(lit(0.0))))
+)
+```
+
+**启用原因**:
+- 虽然数据质量验证显示无异常(8个合约共1140万行tick无问题)
+- 但作为防御性编程,增加此检查确保数据逻辑一致性
+- 性能影响极小,逻辑清晰
+- 与 on_batch 保持一致
+
+**验证结果**:
+- 测试了6个合约,启用前后bar行数完全一致(无数据被过滤)
+- 启用前: bb1710=5229, IF2507=10647, m1503=84108, zn2210=134782, al1207=113353, fu1706=41746
+- 启用后: bb1710=5229, IF2507=10647, m1503=84108, zn2210=134782, al1207=113353, fu1706=41746
+- 变化率: 0.0000% (所有合约)
+
+---
+
 ## 已禁用的过滤规则（注释掉）
 
 以下规则在代码中被注释掉，当前**不生效**：
@@ -333,22 +393,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 D: volume 和 turnover 一致性检查
-
-```rust
-// if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
-//     || (tick.volume > 0 && tick.turnover > 0.0)) {
-//     return false;
-// }
-```
-
-**禁用原因**:
-- 数据源中存在 volume=0 但 turnover>0 的情况
-- 过于严格会导致大量有效数据被过滤
-
----
-
-### ❌ 规则 E: 成交均价区间检查
+### ❌ 规则 D: 成交均价区间检查
 
 ```rust
 // if tick.volume > 0
@@ -367,7 +412,7 @@ let df = df.lazy()
 
 ---
 
-### ❌ 规则 F: 交易时段检查
+### ❌ 规则 E: 交易时段检查
 
 ```rust
 // let dt = match Self::parse_datetime_from_tick(tick) {
@@ -422,6 +467,15 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
                 col("bid_price_1").eq(lit(0.0))  // bid=0, 通过
                 .or(col("ask_price_1").eq(lit(0.0)))  // ask=0, 通过
                 .or(col("bid_price_1").lt_eq(col("ask_price_1")))  // bid <= ask, 通过
+            )
+
+        // 规则 8: volume/turnover 一致性
+            .and(
+                // (volume = 0 且 turnover = 0/NaN) 或 (volume > 0 且 turnover > 0)
+                (col("volume").eq(lit(0)).and(
+                    col("turnover").eq(lit(0.0)).or(col("turnover").is_nan())
+                ))
+                .or(col("volume").gt(lit(0)).and(col("turnover").gt(lit(0.0))))
             )
     )
 ```
@@ -501,13 +555,19 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 版本历史
 
-### v1.2 (当前版本) - 2025-01
+### v1.3 (当前版本) - 2025-01
+- **规则8新增**: volume/turnover 一致性检查
+- 验证结果: 6个合约测试,启用前后bar行数完全一致(无数据被过滤)
+- 启用 8 个过滤规则
+- 禁用 5 个严格规则
+- 与 on_batch 保持完全一致
+
+### v1.2 - 2025-01
 - **规则4更新**: 将 `!is_finite()` 改为 `is_infinite()`，允许 NaN 通过
 - **规则6更新**: 增加 NaN 处理，统一清理 0 和 NaN 价格对应的 volume
 - **规则7新增**: mid_price 重新计算逻辑
-- 启用 7 个过滤规则（新增2个）
-- 禁用 7 个严格规则
-- 与 on_batch 保持完全一致
+- 启用 7 个过滤规则
+- 禁用 6 个严格规则
 
 ### v1.1 - 2024-12
 - **规则6新增**: bid/ask 价格清理（0值转为NULL）
@@ -528,9 +588,9 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 
 ## 总结
 
-当前 `validate_tick` 采用**最小化过滤 + 数据清理**策略：
+当前 `validate_tick` 采用**最小化过滤 + 数据清理 + 逻辑一致性**策略：
 
-✅ **启用规则** (7个):
+✅ **启用规则** (8个):
 1. close 价格有效性
 2. 基础字段非空
 3. turnover 非负
@@ -538,8 +598,9 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 5. bid <= ask（条件性）
 6. bid/ask 价格清理（0值或NaN转为NULL，volume清零）
 7. mid_price 重新计算
+8. volume/turnover 一致性检查 ✨新启用
 
-❌ **禁用规则** (7个):
+❌ **禁用规则** (5个):
 - 避免误过滤有效数据
 - 避免昂贵的性能开销
 - 与 on_batch 保持一致
@@ -550,5 +611,6 @@ let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
 - ✅ 正确表达NULL语义（0价格或NaN → NULL）
 - ✅ 确保volume一致性（无效价格对应的volume清零）
 - ✅ 修正原始数据的mid_price错误
+- ✅ 确保volume/turnover逻辑一致性（防御性编程）
 - ✅ 流式和批量处理完全一致
 - ✅ 高性能处理（无昂贵操作）

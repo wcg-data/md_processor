@@ -276,14 +276,14 @@ impl Bar1MinAggregator {
         //     }
         // }
 
-        // // ---------- volume和turnover的一致性校验 ----------
-        // // 要求：
-        // // - volume = 0 时，turnover 必须为 0 或 NaN（表示“无成交”）
-        // // - volume > 0 时，turnover 必须为正
-        // if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
-        //     || (tick.volume > 0 && tick.turnover > 0.0)) {
-        //     return false;
-        // }
+        // ---------- volume和turnover的一致性校验 ----------
+        // 要求：
+        // - volume = 0 时，turnover 必须为 0 或 NaN（表示"无成交"）
+        // - volume > 0 时，turnover 必须为正
+        if !(tick.volume == 0 && (tick.turnover == 0.0 || tick.turnover.is_nan())
+            || (tick.volume > 0 && tick.turnover > 0.0)) {
+            return false;
+        }
 
         // ---------- 成交均价必须位于 [low-eps, high+eps] ----------
         let eps = 1e-6; // 容差，避免浮点误差带来的误判

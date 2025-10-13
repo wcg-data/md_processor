@@ -110,12 +110,14 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
                     .or(col("ask_price_1").eq(lit(0.0)))  // ask=0, 通过
                     .or(col("bid_price_1").lt_eq(col("ask_price_1")))  // bid>0且ask>0时要求bid<=ask
                 )
-                // // volume和turnover一致性校验
-                // .and( 
-                //     // (volume = 0 且 turnover = 0) 或 (volume > 0 且 turnover > 0)
-                //     (col("volume").eq(lit(0)).and(col("turnover").eq(lit(0.0))))
-                //     .or(col("volume").gt(lit(0)).and(col("turnover").gt(lit(0.0))))
-                // )
+                // volume和turnover一致性校验
+                .and(
+                    // (volume = 0 且 turnover = 0/NaN) 或 (volume > 0 且 turnover > 0)
+                    (col("volume").eq(lit(0)).and(
+                        col("turnover").eq(lit(0.0)).or(col("turnover").is_nan())
+                    ))
+                    .or(col("volume").gt(lit(0)).and(col("turnover").gt(lit(0.0))))
+                )
                 // 字段非空检查
                 .and(col("comd").is_not_null())
                 .and(col("contract").is_not_null())
