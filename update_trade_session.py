@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
 
 # API URL
-API_URL = "http://dict.openctp.cn/times?markets=SHFE,CFFEX,DCE,ZCE,INE,GFEX"
+API_URL = "http://dict.openctp.cn/times?markets=SHFE,CFFEX,DCE,CZCE,INE,GFEX"
 
 # 集合竞价时间规则（根据交易所和交易时段推断）
 # 格式：{交易所: {时段开始时间: (集合竞价开始, 集合竞价结束)}}
@@ -32,7 +32,7 @@ AUCTION_RULES = {
         '21:00:00': ('20:55:00', '21:00:00'),
     },
     # 郑商所(ZCE)：日盘和夜盘都有集合竞价
-    'ZCE': {
+    'CZCE': {
         '09:00:00': ('08:55:00', '09:00:00'),
         '21:00:00': ('20:55:00', '21:00:00'),
     },
