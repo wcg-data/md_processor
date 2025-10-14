@@ -63,7 +63,7 @@ impl TradeSessionMap {
     /// 获取所有品种的交易时间范围，用于向量化过滤
     pub fn get_all_trading_ranges(&self) -> Vec<(NaiveTime, NaiveTime)> {
         let mut all_ranges = Vec::new();
-        
+
         for ranges in self.sessions.values() {
             for range in ranges {
                 if range.start <= range.end {
@@ -71,12 +71,13 @@ impl TradeSessionMap {
                     all_ranges.push((range.start, range.end));
                 } else {
                     // 跨午夜区间，拆分为两个区间
-                    all_ranges.push((range.start, NaiveTime::from_hms_opt(23, 59, 59).unwrap()));
+                    // 修复：使用 23:59:59.999 确保包含所有 23:59:xx.xxx 的时间（包括 23:59:59.500 等带毫秒的时间戳）
+                    all_ranges.push((range.start, NaiveTime::from_hms_milli_opt(23, 59, 59, 999).unwrap()));
                     all_ranges.push((NaiveTime::from_hms_opt(0, 0, 0).unwrap(), range.end));
                 }
             }
         }
-        
+
         // 去重并排序
         all_ranges.sort();
         all_ranges.dedup();
@@ -86,7 +87,7 @@ impl TradeSessionMap {
     /// 获取特定品种的交易时间范围
     pub fn get_trading_ranges(&self, comd: &str) -> Vec<(NaiveTime, NaiveTime)> {
         let mut ranges = Vec::new();
-        
+
         if let Some(time_ranges) = self.sessions.get(comd) {
             for range in time_ranges {
                 if range.start <= range.end {
@@ -94,12 +95,13 @@ impl TradeSessionMap {
                     ranges.push((range.start, range.end));
                 } else {
                     // 跨午夜区间，拆分为两个区间
-                    ranges.push((range.start, NaiveTime::from_hms_opt(23, 59, 59).unwrap()));
+                    // 修复：使用 23:59:59.999 确保包含所有 23:59:xx.xxx 的时间（包括 23:59:59.500 等带毫秒的时间戳）
+                    ranges.push((range.start, NaiveTime::from_hms_milli_opt(23, 59, 59, 999).unwrap()));
                     ranges.push((NaiveTime::from_hms_opt(0, 0, 0).unwrap(), range.end));
                 }
             }
         }
-        
+
         ranges
     }
 
