@@ -32,14 +32,15 @@ MD Processor 是一个专业的量化交易基础设施组件，设计用于：
 - `consumer.rs` - 核心消费逻辑，从缓冲区读取 tick 数据
 
 ### 数据处理层
-- `bar1min_aggregator.rs` - 1 分钟 K 线聚合器
+- `bar1min_aggregator.rs` - 1 分钟 K 线聚合器（包含 validate_tick 过滤函数）
 - `bar5min_aggregator.rs` - 5 分钟 K 线聚合器
 - `aggregator_manager.rs` - 多合约聚合管理器
-- `trade_session_loader.rs` - 交易时段配置加载
+- `trade_session_loader.rs` - 交易时段配置加载器
 
 ### 数据输出层
 - `kafka_client.rs` - Kafka 生产者客户端
-- `parquet_processor.rs` - Parquet 文件处理器
+- `parquet_processor_on_batch.rs` - 批量向量化处理器（使用 Polars）
+- `parquet_processor_on_tick.rs` - 流式逐 tick 处理器
 - `md_structures.rs` - 数据结构定义
 
 ## 快速开始
@@ -64,24 +65,40 @@ cargo build --release    # 发布版本
 ### 运行程序
 
 ```bash
-# 运行主程序
+# 运行主程序（实时处理）
 ./script/run.sh
 
 # 或直接运行
 ./target/debug/md_processor <共享内存名称>
 ./target/release/md_processor <共享内存名称>
 
+# 运行 Parquet 处理器（批量历史数据处理）
+cargo run --bin parquet_processor_on_batch <数据源> <频率> <合约>
+cargo run --bin parquet_processor_on_tick <数据源> <频率> <合约>
+
 # 运行其他工具
 cargo run --bin test_kafka           # Kafka 测试工具
 cargo run --bin trade_session_loader # 交易时段加载器
-cargo run --bin parquet_processor    # Parquet 处理器
 ```
 
 ### 使用示例
 
 ```bash
-# 启动行情处理器，连接到共享内存 "MD_SNAPSHOT_HUATAI"
+# 1. 实时行情处理（连接到共享内存）
 ./target/release/md_processor MD_SNAPSHOT_HUATAI
+
+# 2. 批量处理历史数据（从 Parquet 文件）
+# on_batch: 向量化批处理（推荐，性能更高）
+cargo run --bin parquet_processor_on_batch dongzheng_data 1min bb1710
+
+# on_tick: 流式逐 tick 处理（用于验证一致性）
+cargo run --bin parquet_processor_on_tick dongzheng_data 1min bb1710
+
+# 3. 对比两种处理器结果
+python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
+
+# 4. 更新交易时段配置
+python3 update_trade_session.py
 ```
 
 ## 配置说明
@@ -91,10 +108,25 @@ cargo run --bin parquet_processor    # Parquet 处理器
 项目根目录的 `trade_session.csv` 文件定义了各品种的交易时段：
 
 ```csv
-comd,session_start,session_end,night_start,night_end
-cu,09:00:00,15:00:00,21:00:00,01:00:00
-au,09:00:00,15:00:00,21:00:00,02:30:00
+comd,auction_time,opening_time,closing_time
+ni,20:55:00,21:00:00,01:00:00
+ni,,09:00:00,10:15:00
+ni,,10:30:00,11:30:00
+ni,,13:30:00,15:00:00
 ```
+
+**当前配置状态**：
+- 品种数：168 个
+- 交易时段数：610 个
+- 支持交易所：6 个（SHFE、CFFEX、DCE、CZCE、INE、GFEX）
+
+**自动更新工具**：
+```bash
+# 从 OpenCTP API 获取最新交易时段数据
+python3 update_trade_session.py
+```
+
+详见：[trade_session_更新工具使用指南.md](docs/trade_session_更新工具使用指南.md)
 
 ### Kafka 配置
 
@@ -204,6 +236,34 @@ cargo clippy            # 代码质量检查
 2. 创建功能分支
 3. 提交更改
 4. 发起 Pull Request
+
+## 📚 文档
+
+项目包含详细的技术文档，位于 `docs/` 目录：
+
+### 核心文档
+
+1. **[validate_tick_过滤规则.md](docs/validate_tick_过滤规则.md)**
+   - tick 数据过滤规则完整说明（v1.4）
+   - 9 个启用规则 + 4 个禁用规则
+   - 三层过滤策略：数据质量检查 + 数据清理 + 交易时段过滤
+   - on_batch 和 on_tick 一致性保证
+
+2. **[trade_session_更新工具使用指南.md](docs/trade_session_更新工具使用指南.md)**
+   - 交易时段配置自动更新工具
+   - 支持 168 个品种，6 个交易所
+   - 集合竞价时间自动推断
+   - 从 OpenCTP API 获取最新数据
+
+### 文档目录
+
+查看 **[docs/README.md](docs/README.md)** 获取完整的文档索引和快速参考。
+
+### 相关工具
+
+- **数据对比工具**: `/root/project/md_toolkit/tools/validators/compare_bar_processors.py`
+  - 用途：验证 on_batch 和 on_tick 处理结果一致性
+  - 文档：`/root/project/md_toolkit/tools/validators/README_对比工具.md`
 
 ## 联系方式
 

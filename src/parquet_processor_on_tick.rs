@@ -8,16 +8,7 @@ use chrono::{NaiveDateTime, NaiveDate, Datelike};
 
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
 use md_processor::md_structures::{TickData};
-use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes};
-
-// str_to_fixed 辅助函数：将字符串转换为固定长度的字节数组
-fn str_to_fixed<const N: usize>(s: &str) -> [u8; N] {
-    let mut buf = [0u8; N];
-    let bytes = s.as_bytes();
-    let len = bytes.len().min(N);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf
-}
+use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, str_to_fixed};
 
 /// 优化版离线处理：支持数据排序、按合约分组聚合
 /// 这个函数复用在线处理的Bar1MinAggregator代码，确保离线和在线处理逻辑一致
@@ -146,7 +137,8 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
         Series::new("high", bars.iter().map(|b| b.high).collect::<Vec<_>>()),
         Series::new("low", bars.iter().map(|b| b.low).collect::<Vec<_>>()),
         Series::new("close", bars.iter().map(|b| b.close).collect::<Vec<_>>()),
-        Series::new("prev_close", bars.iter().map(|b| b.prev_close).collect::<Vec<_>>()),
+        // 将NaN转换为NULL（Option<f64>）以与on_batch保持一致
+        Series::new("prev_close", bars.iter().map(|b| if b.prev_close.is_nan() { None } else { Some(b.prev_close) }).collect::<Vec<_>>()),
         Series::new("pre_settle", bars.iter().map(|b| b.pre_settle).collect::<Vec<_>>()),
 
         Series::new("volume", bars.iter().map(|b| b.volume as u32).collect::<Vec<_>>()),
@@ -161,7 +153,8 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
 
         Series::new("mid_price", bars.iter().map(|b| b.mid_price).collect::<Vec<_>>()),
         Series::new("vwap", bars.iter().map(|b| b.vwap).collect::<Vec<_>>()),
-        Series::new("log_return", bars.iter().map(|b| b.log_return).collect::<Vec<_>>()),
+        // 将NaN转换为NULL（Option<f64>）以与on_batch保持一致
+        Series::new("log_return", bars.iter().map(|b| if b.log_return.is_nan() { None } else { Some(b.log_return) }).collect::<Vec<_>>()),
 
         Series::new("maturity_month", bars.iter().map(|b| calculate_maturity_month(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),
         Series::new("maturity_day", bars.iter().map(|b| calculate_maturity_day(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),

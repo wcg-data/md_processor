@@ -151,16 +151,16 @@ impl Bar1MinAggregator {
                 prev.close
             )
         } else {
-            // 第一个bar：直接使用当前累计值
+            // 第一个bar：直接使用当前累计值，prev_close设为NaN
             (
                 last_tick.volume,
                 last_tick.turnover,
                 last_tick.open_interest as i32,
-                last_tick.close  // 第一个bar的prev_close也使用当前close
+                f64::NAN  // 第一个bar的prev_close设为NaN（Parquet存储为NULL）
             )
         };
 
-        // 计算 log_return
+        // 计算 log_return（当prev_close为NaN时，log_return也会是NaN）
         let log_return = (last_tick.close / prev_close).ln();
 
         // volume和turnover一致性检查 - 暂时注释，与on_batch保持一致

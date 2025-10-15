@@ -5,21 +5,40 @@ use chrono::TimeZone;
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
 use crate::trade_session_loader::TRADE_SESSION_MAP;
-use anyhow; 
+use anyhow;
+
+/// 将字符串转换为固定长度的字节数组（用于 C++ 兼容的结构体）
+pub fn str_to_fixed<const N: usize>(s: &str) -> [u8; N] {
+    let mut buf = [0u8; N];
+    let bytes = s.as_bytes();
+    let len = bytes.len().min(N);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf
+}
 
 pub fn to_string_field(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).trim_end_matches('\0').to_string()
 }
 
+/// 提取合约年月：取contract的最后四位数字，若为三位数字则用date年份第三位补全
+/// 支持多种合约格式：bb1710 (6位), rb2510 (6位), IF2507 (6位), AP010 (5位,3位数字)
 pub fn extract_contract_yymm(contract: &str, date: &str) -> String {
+    // 提取合约中的数字部分
     let digits: String = contract.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() == 4 {
-        digits
+
+    if digits.len() >= 4 {
+        // 取最后四位（处理 >= 4 位数字的情况）
+        digits.chars().rev().take(4).collect::<String>().chars().rev().collect()
     } else if digits.len() == 3 {
-        let year_prefix = date.get(2..3).unwrap_or("0");
-        format!("{}{}", year_prefix, digits)
+        // 三位数字，需要用年份第三位补全
+        // 从date中提取年份第三位（如2017年的1）
+        let year_third_digit = date.chars()
+            .nth(2)  // 年份的第三位（索引2）
+            .unwrap_or('0');
+        format!("{}{}", year_third_digit, &digits)
     } else {
-        "".to_string()
+        // 不足3位数字，返回原数字
+        digits
     }
 }
 
@@ -34,6 +53,19 @@ pub fn floor_to_1min(ts: &DateTime<Utc>) -> DateTime<Utc> {
 pub fn floor_to_5min(dt: &DateTime<Utc>) -> DateTime<Utc> {
     let ts = dt.timestamp();
     Utc.timestamp_opt(ts - (ts % 300), 0).single().unwrap()
+}
+
+/// 从 Polars AnyValue 转换时间戳为 NaiveDateTime
+/// 自动检测微秒级（> 1e15）或毫秒级（< 1e15）时间戳
+pub fn parse_anyvalue_datetime(timestamp: i64) -> NaiveDateTime {
+    if timestamp > 1_000_000_000_000_000 {  // > 1e15，微秒级时间戳
+        NaiveDateTime::from_timestamp_micros(timestamp)
+            .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+    } else {
+        // 毫秒级时间戳
+        NaiveDateTime::from_timestamp_millis(timestamp)
+            .unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0))
+    }
 }
 
 /// 计算当前日期距离合约到期月份的月数差
@@ -232,6 +264,10 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
             missing_prev_closes.push(last_close_price);
         }
     }
+
+    // 保存长度（在move之前）
+    let existing_count = existing_indices.len();
+    let missing_count = missing_times.len();
 
     // 第一步：获取所有现有数据
     let existing_rows_df = if !existing_indices.is_empty() {
@@ -505,6 +541,55 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
                         }
                     } else {
                         log_return_values.push(None); // 保持原有的NULL值
+                    }
+                }
+
+                all_columns.push(Series::new("log_return", log_return_values));
+            } else {
+                // 其他列保持不变
+                all_columns.push(final_result.column(col_name)?.clone());
+            }
+        }
+
+        final_result = DataFrame::new(all_columns)?;
+    } else if final_result.height() > 0 {
+        // 特殊情况：所有bar都无成交（volume=0），仍需将第一个bar的prev_close和log_return设为NULL
+        // 使用向量化操作高效处理
+        let mut all_columns = Vec::new();
+
+        for (col_name, _) in final_result.schema().iter() {
+            if col_name == "prev_close" {
+                // 将第一个bar的prev_close设为NULL，其余保持不变
+                let prev_close_col = final_result.column("prev_close")?;
+                let mut prev_close_values: Vec<Option<f64>> = Vec::new();
+
+                for i in 0..prev_close_col.len() {
+                    if i == 0 {
+                        prev_close_values.push(None); // 第一个bar的prev_close设为NULL
+                    } else if let AnyValue::Float64(val) = prev_close_col.get(i)? {
+                        prev_close_values.push(Some(val));
+                    } else {
+                        prev_close_values.push(None);
+                    }
+                }
+
+                all_columns.push(Series::new("prev_close", prev_close_values));
+            } else if col_name == "log_return" {
+                // 将第一个bar的log_return设为NULL，同时将所有NaN转为NULL
+                let log_return_col = final_result.column("log_return")?;
+                let mut log_return_values: Vec<Option<f64>> = Vec::new();
+
+                for i in 0..log_return_col.len() {
+                    if i == 0 {
+                        log_return_values.push(None); // 第一个bar的log_return设为NULL
+                    } else if let AnyValue::Float64(val) = log_return_col.get(i)? {
+                        if val.is_nan() {
+                            log_return_values.push(None);
+                        } else {
+                            log_return_values.push(Some(val));
+                        }
+                    } else {
+                        log_return_values.push(None);
                     }
                 }
 

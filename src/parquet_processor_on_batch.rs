@@ -1,18 +1,17 @@
-// src/parquet_processor.rs
+// parquet_processor_on_batch.rs - 批量向量化处理tick数据生成1min/5min bar
+// 支持单合约处理和多线程并行批量处理
 
 use std::path::Path;
-use chrono::{NaiveDateTime, NaiveDate, Datelike, Timelike, DateTime, Utc};
+
+const DATA_ROOT: &str = "/data/future_data";
+use chrono::{NaiveDateTime, DateTime, Timelike};
 use std::fs::File;
 use polars::prelude::*;
 use std::thread;
 use std::sync::Arc;
 
-
-use md_processor::bar1min_aggregator::Bar1MinAggregator;
-use md_processor::md_structures::{TickData};
 use md_processor::trade_session_loader::TRADE_SESSION_MAP;
-
-use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, str_to_fixed, extract_contract_yymm, parse_anyvalue_datetime};
+use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, extract_contract_yymm, parse_anyvalue_datetime};
 
 /// 从 parquet 文件加载并过滤数据
 fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<DataFrame> {
@@ -742,13 +741,15 @@ fn extract_contract_name(file_path: &str) -> Option<String> {
 }
 
 /// 最简单的原生并行处理，支持tick->1min和1min->5min两种模式
-fn process_batch_simple(data_source: &str, mode: &str, num_threads: usize) -> anyhow::Result<()> {
+fn process_batch_simple(data_source_name: &str, mode: &str, num_threads: usize) -> anyhow::Result<()> {
+    let data_source = format!("{}/{}", DATA_ROOT, data_source_name);
+
     let (input_dir, output_dir, input_suffix, output_suffix) = match mode {
         "1min" => {
             // tick -> 1min
             (
-                format!("/data/future_data/{}/full_tick", data_source),
-                format!("/data/future_data/{}/full_bar_1min", data_source),
+                format!("{}/full_tick", data_source),
+                format!("{}/full_bar_1min", data_source),
                 "",
                 "_1min"
             )
@@ -756,8 +757,8 @@ fn process_batch_simple(data_source: &str, mode: &str, num_threads: usize) -> an
         "5min" => {
             // 1min -> 5min
             (
-                format!("/data/future_data/{}/full_bar_1min", data_source),
-                format!("/data/future_data/{}/full_bar_5min", data_source),
+                format!("{}/full_bar_1min", data_source),
+                format!("{}/full_bar_5min", data_source),
                 "_1min",
                 "_5min"
             )
@@ -851,42 +852,64 @@ fn process_batch_simple(data_source: &str, mode: &str, num_threads: usize) -> an
     Ok(())
 }
 
-// 主函数：并行处理
+// 主函数：支持批量并行和单合约处理
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        println!("使用方法: {} <data_source> [mode] [threads]", args[0]);
-        println!("参数说明:");
-        println!("  data_source: 数据源名称 (如 dongzheng_data)");
-        println!("  mode: 处理模式 (1min 或 5min, 默认1min)");
-        println!("    1min: tick -> 1min bar");
-        println!("    5min: 1min -> 5min bar");
-        println!("  threads: 并发线程数 (默认4)");
-        println!();
+        println!("用法: {} <data_source> [mode] [threads|contract]", args[0]);
         println!("示例:");
-        println!("  {} dongzheng_data 1min 8     # tick->1min，8线程", args[0]);
-        println!("  {} dongzheng_data 5min 4     # 1min->5min，4线程", args[0]);
+        println!("  {} dongzheng_data 1min      # 批量处理，4线程", args[0]);
+        println!("  {} dongzheng_data 1min 8    # 批量处理，8线程", args[0]);
+        println!("  {} dongzheng_data 1min bb1710  # 单合约", args[0]);
         return Ok(());
     }
 
     let data_source = args.get(1).map(|s| s.as_str()).unwrap_or("dongzheng_data");
     let mode = args.get(2).map(|s| s.as_str()).unwrap_or("1min");
-    let num_threads = args.get(3)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(4);
 
     if mode != "1min" && mode != "5min" {
-        eprintln!("错误: 不支持的处理模式 '{}', 请使用 '1min' 或 '5min'", mode);
+        eprintln!("错误: mode必须是1min或5min");
         return Ok(());
     }
 
-    println!("=== 原生并行处理 ===");
-    println!("数据源: {}", data_source);
-    println!("处理模式: {}", if mode == "1min" { "tick -> 1min" } else { "1min -> 5min" });
-    println!("线程数: {}", num_threads);
+    // 第3个参数：数字=线程数（批量），字符串=合约名（单个）
+    if let Some(third) = args.get(3) {
+        if let Ok(threads) = third.parse::<usize>() {
+            // 批量处理
+            println!("批量处理: {} {} ({}线程)", data_source, mode, threads);
+            process_batch_simple(data_source, mode, threads)?;
+        } else {
+            // 单合约处理
+            println!("单合约: {} {} {}", data_source, mode, third);
+            let data_path = format!("{}/{}", DATA_ROOT, data_source);
+            let (input_dir, output_dir, input_suffix, output_suffix) =
+                if mode == "1min" {
+                    ("full_tick", "full_bar_1min", "", "_1min")
+                } else {
+                    ("full_bar_1min", "full_bar_5min", "_1min", "_5min")
+                };
 
-    process_batch_simple(data_source, mode, num_threads)?;
+            let input = format!("{}/{}/{}{}.parquet", data_path, input_dir, third, input_suffix);
+            let output = format!("{}/{}/{}{}.parquet", data_path, output_dir, third, output_suffix);
+
+            let result = if mode == "1min" {
+                process_parquet_optimized(&input, &output)
+            } else {
+                process_1min_to_5min(&input, &output)
+            };
+
+            match result {
+                Ok(()) => println!("✓ 成功"),
+                Err(e) => eprintln!("✗ 失败: {}", e),
+            }
+        }
+    } else {
+        // 默认批量处理，4线程
+        println!("批量处理: {} {} (4线程)", data_source, mode);
+        process_batch_simple(data_source, mode, 4)?;
+    }
+
     Ok(())
 }
 

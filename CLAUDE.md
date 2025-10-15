@@ -1,89 +1,96 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## 项目概述
 
-md_processor 是一个高性能的市场数据处理系统，使用 Rust 编写，专门用于处理金融市场实时行情数据。
+md_processor - 高性能期货市场数据处理系统（Rust）
 
-主要功能：
-- 从共享内存读取 tick 数据（华泰证券市场快照）
-- 将 tick 数据聚合为 1 分钟 K 线
-- 通过 Kafka 发布处理后的数据
-- 使用 ClickHouse 存储历史数据
+**核心功能**：
+- tick数据聚合为1分钟K线
+- 支持批量处理（on_batch）和流式处理（on_tick）
+- 交易时段过滤和缺失分钟补全
 
 ## 常用命令
 
 ```bash
-# 构建项目（调试和发布版本）
-./script/build.sh
+# 编译
+cargo build --release
 
-# 运行调试版本
-./script/run.sh
-# 或直接运行
-./target/debug/md_processor
+# on_batch处理（批量并行，推荐）
+./target/release/parquet_processor_on_batch dongzheng_data 1min      # 4线程
+./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # 8线程
+./target/release/parquet_processor_on_batch dongzheng_data 1min bb1710  # 单合约
 
-# 运行发布版本（性能更好）
-./target/release/md_processor
+# on_tick处理（单合约）
+cargo run --bin parquet_processor_on_tick dongzheng_data 1min bb1710
 
-# 单独构建
-cargo build              # 调试版本
-cargo build --release    # 发布版本
+# 对比验证
+python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
 
-# 运行测试 Kafka 工具
-cargo run --bin test_kafka
-
-# 检查代码
-cargo check
-cargo clippy
-
-# 运行测试
-cargo test
+# 更新交易时段配置
+python3 update_trade_session.py
 ```
 
-## 代码架构
+## 核心模块
 
-### 核心模块
+**数据处理**：
+- `bar1min_aggregator.rs` - 1分钟聚合器，包含 `validate_tick` 过滤函数
+- `parquet_processor_on_batch.rs` - 批量向量化处理（Polars）
+- `parquet_processor_on_tick.rs` - 流式逐tick处理
+- `common_utils.rs` - 共享工具（`fill_missing_minutes` 等）
 
-@md_processor.rs - 主程序入口，初始化共享内存映射和消费者
-@consumer.rs - 核心消费逻辑，从无锁环形缓冲区读取 tick 数据并处理
-@bar_aggregator.rs - 将 tick 数据聚合为 1 分钟 K 线数据
-@shared_memory.rs - 共享内存映射工具，用于进程间通信
-@ring_buffer.rs - 无锁环形缓冲区实现，高性能数据共享
-@kafka_client.rs - Kafka 客户端封装，发布处理后的数据
-@md_structures.rs - 数据结构定义，包括 TickData 和 Bar1Min（C++ 兼容）
+**配置**：
+- `trade_session_loader.rs` - 交易时段加载器
+- `trade_session.csv` - 交易时段配置（168品种，6交易所）
 
-### 数据流程
+**数据结构**：
+- `md_structures.rs` - TickData、Bar1Min（C++兼容）
 
-1. **数据接收**：通过共享内存（"MD_SNAPSHOT_HUATAI"）接收实时 tick 数据
-2. **数据读取**：Consumer 使用无锁环形缓冲区读取数据
-3. **数据聚合**：BarAggregator 将 tick 聚合为分钟 K 线
-4. **数据发布**：通过 Kafka 发布处理后的数据
-5. **数据存储**：写入 ClickHouse 数据库
+## 数据过滤规则
 
-### 技术特点
+**9个启用规则**（详见 `docs/validate_tick_过滤规则.md`）：
+1. close价格有效性
+2. 基础字段非空
+3. turnover非负
+4. bid/ask有效性
+5. bid≤ask（条件性）
+6. bid/ask清理（0/NaN→NULL）
+7. mid_price重算
+8. volume/turnover一致性
+9. 交易时段过滤
 
-- **高性能设计**：无锁数据结构、零拷贝、原子操作
-- **FFI 兼容**：使用 `#[repr(C)]` 确保与 C++ 系统兼容
-- **异步处理**：基于 Tokio 的异步运行时
-- **实时性**：专为低延迟金融数据处理设计
+**重要**：修改过滤规则需同步更新 `bar1min_aggregator.rs` 和 `parquet_processor_on_batch.rs`
 
-## 开发注意事项
+## 开发工作流
 
-- 代码注释使用中文
-- 保持模块化设计，每个文件专注单一功能
-- 性能关键路径避免内存分配
-- 使用原子操作保证线程安全
-- 数据结构必须保持 C++ 兼容性（用于跨进程通信）
+### 修改过滤规则
+1. 同步修改 `validate_tick` 和 on_batch 向量化逻辑
+2. `cargo build --release`
+3. 测试并对比两种处理器结果
+4. 更新文档版本号
+
+### 更新交易时段
+1. `python3 update_trade_session.py`
+2. `cargo clean && cargo build --release`
+3. 验证关键合约
+
+### 验证一致性
+```bash
+# 单个合约
+python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
+
+# 批量对比
+python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py --batch bb1710 y1701 m1503
+```
 
 ## 重要文档
 
-### 数据过滤规则
-@docs/validate_tick_过滤规则.md - validate_tick 函数的详细过滤规则文档
-- 记录所有启用和禁用的过滤规则
-- 说明 on_tick 和 on_batch 的一致性保证
-- 提供过滤示例和调试建议
+- `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.4）
+- `docs/trade_session_更新工具使用指南.md` - 交易时段配置
+- `docs/README.md` - 文档索引
 
-### 数据对比工具
-@/root/project/md_toolkit/tools/validators/compare_bar_processors.py - 对比 on_batch 和 on_tick 处理结果
-@/root/project/md_toolkit/tools/validators/README_对比工具.md - 对比工具使用指南
+## 技术特点
+
+- **高性能**：无锁数据结构、零拷贝、向量化处理
+- **一致性**：on_batch和on_tick结果验证一致（16/17字段完全一致）
+- **C++兼容**：`#[repr(C)]` 确保跨进程通信
+- **容错性**：自动跳过损坏文件和空数据
