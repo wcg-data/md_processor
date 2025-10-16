@@ -162,7 +162,12 @@ python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py --ba
 
 ### 核心模块
 
-**过滤和聚合**:
+**可执行程序**（统一命名：数据源_processor_on_模式）:
+- `src/memory_processor_on_tick.rs` - 实时共享内存逐tick处理（自包含）
+- `src/parquet_processor_on_batch.rs` - 离线批量向量化处理（自包含）
+- `src/parquet_processor_on_tick.rs` - 离线流式逐tick处理（自包含）
+
+**数据处理库**:
 - `src/bar1min_aggregator.rs` - 1分钟聚合器（包含 validate_tick）
 - `src/bar5min_aggregator.rs` - 5分钟聚合器
 - `src/aggregator_manager.rs` - 聚合管理器
@@ -171,10 +176,6 @@ python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py --ba
 - `src/trade_session_loader.rs` - 交易时段加载器
 - `trade_session.csv` - 交易时段配置
 - `update_trade_session.py` - 自动更新工具
-
-**数据处理**:
-- `src/parquet_processor_on_batch.rs` - 批量向量化处理
-- `src/parquet_processor_on_tick.rs` - 流式逐tick处理
 
 ---
 

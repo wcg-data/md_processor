@@ -27,8 +27,8 @@ polars = { version = "0.41", features = ["lazy", "parquet","serde","ndarray", "d
 
 
 [[bin]]
-name = "md_processor"
-path = "src/md_processor.rs"
+name = "memory_processor_on_tick"
+path = "src/memory_processor_on_tick.rs"
 
 [[bin]]
 name = "test_kafka"

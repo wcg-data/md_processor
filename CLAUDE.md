@@ -32,10 +32,14 @@ python3 update_trade_session.py
 
 ## 核心模块
 
-**数据处理**：
+**可执行程序**（统一命名：数据源_processor_on_模式）：
+- `memory_processor_on_tick.rs` - 实时共享内存逐tick处理（177行，自包含）
+- `parquet_processor_on_batch.rs` - 离线批量并行处理（970行，自包含）
+- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（224行，自包含）
+
+**数据处理库**：
 - `bar1min_aggregator.rs` - 1分钟聚合器，包含 `validate_tick` 过滤函数
-- `parquet_processor_on_batch.rs` - 批量向量化处理（Polars）
-- `parquet_processor_on_tick.rs` - 流式逐tick处理
+- `aggregator_manager.rs` - 多合约聚合管理器
 - `common_utils.rs` - 共享工具（`fill_missing_minutes` 等）
 
 **配置**：
@@ -43,7 +47,8 @@ python3 update_trade_session.py
 - `trade_session.csv` - 交易时段配置（168品种，6交易所）
 
 **数据结构**：
-- `md_structures.rs` - TickData、Bar1Min（C++兼容）
+- `md_structures.rs` - TickData、BarData（C++兼容）
+- `ring_buffer.rs` - 共享内存环形缓冲区
 
 ## 数据过滤规则
 

@@ -1,7 +1,6 @@
 pub mod md_structures;
 pub mod ring_buffer;
 pub mod shared_memory;
-pub mod consumer;
 pub mod bar1min_aggregator;
 pub mod bar5min_aggregator;
 pub mod common_utils;

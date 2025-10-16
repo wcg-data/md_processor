@@ -26,22 +26,23 @@ MD Processor 是一个专业的量化交易基础设施组件，设计用于：
 
 ## 核心模块
 
-### 数据接收层
-- `shared_memory.rs` - 共享内存映射，支持跨进程通信
-- `ring_buffer.rs` - 无锁环形缓冲区实现
-- `consumer.rs` - 核心消费逻辑，从缓冲区读取 tick 数据
+### 可执行程序（统一命名：数据源_processor_on_模式）
+- `memory_processor_on_tick.rs` - 实时共享内存逐tick处理（177行，自包含）
+- `parquet_processor_on_batch.rs` - 离线批量并行处理（970行，自包含）
+- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（224行，自包含）
 
-### 数据处理层
+### 数据处理库
 - `bar1min_aggregator.rs` - 1 分钟 K 线聚合器（包含 validate_tick 过滤函数）
 - `bar5min_aggregator.rs` - 5 分钟 K 线聚合器
 - `aggregator_manager.rs` - 多合约聚合管理器
-- `trade_session_loader.rs` - 交易时段配置加载器
 
-### 数据输出层
+### 基础设施层
+- `shared_memory.rs` - 共享内存映射，支持跨进程通信
+- `ring_buffer.rs` - 无锁环形缓冲区实现
 - `kafka_client.rs` - Kafka 生产者客户端
-- `parquet_processor_on_batch.rs` - 批量向量化处理器（使用 Polars）
-- `parquet_processor_on_tick.rs` - 流式逐 tick 处理器
-- `md_structures.rs` - 数据结构定义
+- `trade_session_loader.rs` - 交易时段配置加载器
+- `md_structures.rs` - 数据结构定义（C++兼容）
+- `common_utils.rs` - 共享工具函数
 
 ## 快速开始
 
@@ -69,8 +70,8 @@ cargo build --release    # 发布版本
 ./script/run.sh
 
 # 或直接运行
-./target/debug/md_processor <共享内存名称>
-./target/release/md_processor <共享内存名称>
+./target/debug/memory_processor_on_tick <共享内存名称>
+./target/release/memory_processor_on_tick <共享内存名称>
 
 # 运行 Parquet 处理器（批量历史数据处理）
 cargo run --bin parquet_processor_on_batch <数据源> <频率> <合约>
@@ -78,14 +79,13 @@ cargo run --bin parquet_processor_on_tick <数据源> <频率> <合约>
 
 # 运行其他工具
 cargo run --bin test_kafka           # Kafka 测试工具
-cargo run --bin trade_session_loader # 交易时段加载器
 ```
 
 ### 使用示例
 
 ```bash
 # 1. 实时行情处理（连接到共享内存）
-./target/release/md_processor MD_SNAPSHOT_HUATAI
+./target/release/memory_processor_on_tick MD_SNAPSHOT_HUATAI
 
 # 2. 批量处理历史数据（从 Parquet 文件）
 # on_batch: 向量化批处理（推荐，性能更高）
