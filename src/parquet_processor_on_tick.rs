@@ -7,8 +7,44 @@ use polars::prelude::*;
 use chrono::{NaiveDateTime, NaiveDate, Datelike};
 
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
-use md_processor::md_structures::{TickData};
+use md_processor::md_structures::{TickData, BarData};
 use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, str_to_fixed};
+
+/// 从 BarData 向量构建输出 DataFrame
+fn build_bars_dataframe(bars: &[BarData]) -> PolarsResult<DataFrame> {
+    DataFrame::new(vec![
+        Series::new("contract", bars.iter().map(|b| b.contract.as_str()).collect::<Vec<_>>()),
+        Series::new("contract_yymm", bars.iter().map(|b| b.contract_yymm.as_str()).collect::<Vec<_>>()),
+        Series::new("comd", bars.iter().map(|b| b.comd.as_str()).collect::<Vec<_>>()),
+        Series::new("exchange", bars.iter().map(|b| b.exchange.as_str()).collect::<Vec<_>>()),
+        Series::new("date", bars.iter().map(|b| b.date.as_str()).collect::<Vec<_>>()),
+        Series::new("trade_time", bars.iter().map(|b| b.trade_time.as_str()).collect::<Vec<_>>()),
+
+        Series::new("open", bars.iter().map(|b| b.open).collect::<Vec<_>>()),
+        Series::new("high", bars.iter().map(|b| b.high).collect::<Vec<_>>()),
+        Series::new("low", bars.iter().map(|b| b.low).collect::<Vec<_>>()),
+        Series::new("close", bars.iter().map(|b| b.close).collect::<Vec<_>>()),
+        Series::new("prev_close", bars.iter().map(|b| if b.prev_close.is_nan() { None } else { Some(b.prev_close) }).collect::<Vec<_>>()),
+        Series::new("pre_settle", bars.iter().map(|b| b.pre_settle).collect::<Vec<_>>()),
+
+        Series::new("volume", bars.iter().map(|b| b.volume as u32).collect::<Vec<_>>()),
+        Series::new("turnover", bars.iter().map(|b| b.turnover).collect::<Vec<_>>()),
+        Series::new("open_interest", bars.iter().map(|b| b.open_interest as u32).collect::<Vec<_>>()),
+        Series::new("open_interest_diff", bars.iter().map(|b| b.open_interest_diff).collect::<Vec<_>>()),
+
+        Series::new("bid_price_1", bars.iter().map(|b| b.bid_price_1).collect::<Vec<_>>()),
+        Series::new("bid_volume_1", bars.iter().map(|b| b.bid_volume_1 as u32).collect::<Vec<_>>()),
+        Series::new("ask_price_1", bars.iter().map(|b| b.ask_price_1).collect::<Vec<_>>()),
+        Series::new("ask_volume_1", bars.iter().map(|b| b.ask_volume_1 as u32).collect::<Vec<_>>()),
+
+        Series::new("mid_price", bars.iter().map(|b| b.mid_price).collect::<Vec<_>>()),
+        Series::new("vwap", bars.iter().map(|b| b.vwap).collect::<Vec<_>>()),
+        Series::new("log_return", bars.iter().map(|b| if b.log_return.is_nan() { None } else { Some(b.log_return) }).collect::<Vec<_>>()),
+
+        Series::new("maturity_month", bars.iter().map(|b| calculate_maturity_month(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),
+        Series::new("maturity_day", bars.iter().map(|b| calculate_maturity_day(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),
+    ])
+}
 
 /// 优化版离线处理：支持数据排序、按合约分组聚合
 /// 这个函数复用在线处理的Bar1MinAggregator代码，确保离线和在线处理逻辑一致
@@ -125,40 +161,7 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
     }
 
     // 构造 polars DataFrame
-    let mut df_out = DataFrame::new(vec![
-        Series::new("contract", bars.iter().map(|b| b.contract.as_str()).collect::<Vec<_>>()),
-        Series::new("contract_yymm", bars.iter().map(|b| b.contract_yymm.as_str()).collect::<Vec<_>>()),
-        Series::new("comd", bars.iter().map(|b| b.comd.as_str()).collect::<Vec<_>>()),
-        Series::new("exchange", bars.iter().map(|b| b.exchange.as_str()).collect::<Vec<_>>()),
-        Series::new("date", bars.iter().map(|b| b.date.as_str()).collect::<Vec<_>>()),
-        Series::new("trade_time", bars.iter().map(|b| b.trade_time.as_str()).collect::<Vec<_>>()),
-
-        Series::new("open", bars.iter().map(|b| b.open).collect::<Vec<_>>()),
-        Series::new("high", bars.iter().map(|b| b.high).collect::<Vec<_>>()),
-        Series::new("low", bars.iter().map(|b| b.low).collect::<Vec<_>>()),
-        Series::new("close", bars.iter().map(|b| b.close).collect::<Vec<_>>()),
-        // 将NaN转换为NULL（Option<f64>）以与on_batch保持一致
-        Series::new("prev_close", bars.iter().map(|b| if b.prev_close.is_nan() { None } else { Some(b.prev_close) }).collect::<Vec<_>>()),
-        Series::new("pre_settle", bars.iter().map(|b| b.pre_settle).collect::<Vec<_>>()),
-
-        Series::new("volume", bars.iter().map(|b| b.volume as u32).collect::<Vec<_>>()),
-        Series::new("turnover", bars.iter().map(|b| b.turnover).collect::<Vec<_>>()),
-        Series::new("open_interest", bars.iter().map(|b| b.open_interest as u32).collect::<Vec<_>>()),
-        Series::new("open_interest_diff", bars.iter().map(|b| b.open_interest_diff).collect::<Vec<_>>()),
-
-        Series::new("bid_price_1", bars.iter().map(|b| b.bid_price_1).collect::<Vec<_>>()),
-        Series::new("bid_volume_1", bars.iter().map(|b| b.bid_volume_1 as u32).collect::<Vec<_>>()),
-        Series::new("ask_price_1", bars.iter().map(|b| b.ask_price_1).collect::<Vec<_>>()),
-        Series::new("ask_volume_1", bars.iter().map(|b| b.ask_volume_1 as u32).collect::<Vec<_>>()),
-
-        Series::new("mid_price", bars.iter().map(|b| b.mid_price).collect::<Vec<_>>()),
-        Series::new("vwap", bars.iter().map(|b| b.vwap).collect::<Vec<_>>()),
-        // 将NaN转换为NULL（Option<f64>）以与on_batch保持一致
-        Series::new("log_return", bars.iter().map(|b| if b.log_return.is_nan() { None } else { Some(b.log_return) }).collect::<Vec<_>>()),
-
-        Series::new("maturity_month", bars.iter().map(|b| calculate_maturity_month(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),
-        Series::new("maturity_day", bars.iter().map(|b| calculate_maturity_day(&b.contract_yymm, &b.date)).collect::<Vec<_>>()),
-    ])?;
+    let mut df_out = build_bars_dataframe(&bars)?;
 
     // 应用缺失分钟补全功能（复用在线代码逻辑）
     df_out = match fill_missing_minutes(df_out.clone()) {
