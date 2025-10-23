@@ -14,14 +14,24 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 ```bash
 # 编译
 cargo build --release
+./script/build.sh  # 或使用脚本
+
+# 批量处理所有合约（完整流程：tick→1min→5min→主力合约）
+./script/process_all_contracts.sh                  # 重新生成所有数据（64线程）
+./script/process_all_contracts.sh --skip-clean     # 增量处理
+./script/process_all_contracts.sh --threads 32     # 自定义线程数
 
 # on_batch处理（批量并行，推荐）
-./target/release/parquet_processor_on_batch dongzheng_data 1min      # 4线程
-./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # 8线程
+./target/release/parquet_processor_on_batch dongzheng_data 1min      # tick→1min, 4线程
+./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # tick→1min, 8线程
+./target/release/parquet_processor_on_batch dongzheng_data 5min 8    # 1min→5min, 8线程
 ./target/release/parquet_processor_on_batch dongzheng_data 1min bb1710  # 单合约
 
 # on_tick处理（单合约）
 cargo run --bin parquet_processor_on_tick dongzheng_data 1min bb1710
+
+# 生成主力合约数据
+python3 /root/project/md_toolkit/processors/gen_main_bars.py --freqs 1min 5min
 
 # 对比验证
 python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
@@ -34,11 +44,12 @@ python3 update_trade_session.py
 
 **可执行程序**（统一命名：数据源_processor_on_模式）：
 - `memory_processor_on_tick.rs` - 实时共享内存逐tick处理（177行，自包含）
-- `parquet_processor_on_batch.rs` - 离线批量并行处理（970行，自包含）
+- `parquet_processor_on_batch.rs` - 离线批量并行处理（970行，自包含，支持1min和5min）
 - `parquet_processor_on_tick.rs` - 离线逐tick增量处理（224行，自包含）
 
 **数据处理库**：
 - `bar1min_aggregator.rs` - 1分钟聚合器，包含 `validate_tick` 过滤函数
+- `bar5min_aggregator.rs` - 5分钟聚合器，从1min bar聚合到5min bar
 - `aggregator_manager.rs` - 多合约聚合管理器
 - `common_utils.rs` - 共享工具（`fill_missing_minutes` 等）
 
@@ -87,8 +98,23 @@ python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb17
 python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py --batch bb1710 y1701 m1503
 ```
 
+## 数据处理流程
+
+```
+数据输入: /data/future_data/dongzheng_data/full_tick/ (8712个合约)
+    ↓ [parquet_processor_on_batch dongzheng_data 1min]
+中间输出: full_bar_1min/
+    ↓ [parquet_processor_on_batch dongzheng_data 5min]
+中间输出: full_bar_5min/
+    ↓ [gen_main_bars.py]
+最终输出: main_bar_1min/ + main_bar_5min/ (主力合约)
+```
+
+**一键执行**：`./script/process_all_contracts.sh`
+
 ## 重要文档
 
+- `script/README.md` - 脚本使用说明
 - `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.4）
 - `docs/trade_session_更新工具使用指南.md` - 交易时段配置
 - `docs/README.md` - 文档索引
