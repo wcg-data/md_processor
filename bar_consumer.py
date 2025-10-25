@@ -82,7 +82,7 @@ def consume_messages_lag_commit(topics, group_id):
     LAG = 1000
     offset_cache = defaultdict(lambda: deque(maxlen=LAG + 1))
 
-    BATCH_SIZE = 5000  
+    BATCH_SIZE = 5000
     try:
         while True:
             # msg = consumer.poll(timeout=1.0)

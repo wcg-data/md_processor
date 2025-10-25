@@ -4,12 +4,16 @@ use std::{collections::HashSet, thread, time::Duration, env};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use chrono::{Timelike, Local};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::sync::Mutex;
 
 use md_processor::shared_memory::map_shared_ring_buffer;
 use md_processor::ring_buffer::SharedRingBuffer;
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
 use md_processor::aggregator_manager::AggregatorManager;
-use md_processor::kafka_client;
+// use md_processor::kafka_client;  // 临时注释，后续改回Kafka时取消注释
+use md_processor::md_structures::BarData;
 
 /// 聚合模式：单合约或多合约
 pub enum AggregationMode {
@@ -17,6 +21,89 @@ pub enum AggregationMode {
     Single(HashSet<String>),
     /// 多合约模式，自动为出现的每个合约维护一个聚合器
     Multi,
+}
+
+// ========== 临时CSV输出功能（后续会改回Kafka） ==========
+
+/// 全局CSV文件句柄（带缓冲区）
+struct CsvWriter {
+    file_1min: Mutex<std::io::BufWriter<std::fs::File>>,
+    file_5min: Mutex<std::io::BufWriter<std::fs::File>>,
+}
+
+lazy_static::lazy_static! {
+    static ref CSV_WRITER: CsvWriter = {
+        let file_1min = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("output/md_snapshot_RTdongzheng_1min.csv.20251027")
+            .expect("无法创建1min CSV文件");
+
+        let file_5min = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("output/md_snapshot_RTdongzheng_5min.csv.20251027")
+            .expect("无法创建5min CSV文件");
+
+        let mut writer_1min = std::io::BufWriter::new(file_1min);
+        let mut writer_5min = std::io::BufWriter::new(file_5min);
+
+        // 写入CSV表头（与parquet文件列名一致）
+        let header = "contract,contract_yymm,comd,exchange,date,trade_time,open,high,low,close,prev_close,pre_settle,volume,turnover,open_interest,open_interest_diff,bid_price_1,bid_volume_1,ask_price_1,ask_volume_1,mid_price,vwap,log_return,maturity_month,maturity_day\n";
+        writer_1min.write_all(header.as_bytes()).expect("无法写入1min表头");
+        writer_5min.write_all(header.as_bytes()).expect("无法写入5min表头");
+
+        CsvWriter {
+            file_1min: Mutex::new(writer_1min),
+            file_5min: Mutex::new(writer_5min),
+        }
+    };
+}
+
+/// 临时函数：将BarData写入CSV（替代Kafka）
+fn write_bar_to_csv(bar: &BarData, freq: &str) {
+    let csv_line = format!(
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+        bar.contract.trim_end_matches('\0'),
+        bar.contract_yymm.trim_end_matches('\0'),
+        bar.comd.trim_end_matches('\0'),
+        bar.exchange.trim_end_matches('\0'),
+        bar.date,
+        bar.trade_time.trim_end_matches('\0'),
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.prev_close,
+        bar.pre_settle,
+        bar.volume,
+        bar.turnover,
+        bar.open_interest,
+        bar.open_interest_diff,
+        if bar.bid_price_1 == 0.0 { String::new() } else { bar.bid_price_1.to_string() },
+        if bar.bid_volume_1 == 0 { String::new() } else { bar.bid_volume_1.to_string() },
+        if bar.ask_price_1 == 0.0 { String::new() } else { bar.ask_price_1.to_string() },
+        if bar.ask_volume_1 == 0 { String::new() } else { bar.ask_volume_1.to_string() },
+        if bar.mid_price == 0.0 { String::new() } else { bar.mid_price.to_string() },
+        bar.vwap,
+        if bar.log_return.is_nan() { String::new() } else { bar.log_return.to_string() },
+        bar.maturity_month,
+        bar.maturity_day
+    );
+
+    match freq {
+        "1min" => {
+            let mut writer = CSV_WRITER.file_1min.lock().unwrap();
+            writer.write_all(csv_line.as_bytes()).expect("写入1min CSV失败");
+        }
+        "5min" => {
+            let mut writer = CSV_WRITER.file_5min.lock().unwrap();
+            writer.write_all(csv_line.as_bytes()).expect("写入5min CSV失败");
+        }
+        _ => {}
+    }
 }
 
 /// 核心处理函数：从共享内存消费tick数据并实时聚合
@@ -69,7 +156,8 @@ fn single_contract_loop(
                     .to_string();
                 if contracts_filter.contains(&contract_str) {
                     if let Some(bar) = aggregator.on_tick(&mut tick.clone()) {
-                        kafka_client::send_bar_data(&bar, "1min");
+                        // kafka_client::send_bar_data(&bar, "1min");  // 临时注释
+                        write_bar_to_csv(&bar, "1min");  // 临时CSV输出
                     }
                 }
             }
@@ -79,7 +167,8 @@ fn single_contract_loop(
 
     // 程序退出前 flush 最后一条
     if let Some(bar) = aggregator.flush() {
-        kafka_client::send_bar_data(&bar, "1min");
+        // kafka_client::send_bar_data(&bar, "1min");  // 临时注释
+        write_bar_to_csv(&bar, "1min");  // 临时CSV输出
     }
 
     Ok(())
@@ -102,11 +191,13 @@ fn multi_contract_loop(
 
             // ① flush 1 min bar（活跃合约）
             for bar1min in manager.flush_all_bar1min_active() {
-                kafka_client::send_bar_data(&bar1min, "1min");
+                // kafka_client::send_bar_data(&bar1min, "1min");  // 临时注释
+                write_bar_to_csv(&bar1min, "1min");  // 临时CSV输出
 
                 // ② 把 1 min 喂入 5 min 聚合器
                 if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
-                    kafka_client::send_bar_data(&bar5min, "5min");
+                    // kafka_client::send_bar_data(&bar5min, "5min");  // 临时注释
+                    write_bar_to_csv(&bar5min, "5min");  // 临时CSV输出
                 }
             }
         }
@@ -115,11 +206,13 @@ fn multi_contract_loop(
         if let Some(mut tick) = ring_buffer.pop_market_data() {
             // ③ Tick → 1 min
             if let Some(bar1min) = manager.on_tick(&mut tick) {
-                kafka_client::send_bar_data(&bar1min, "1min");
+                // kafka_client::send_bar_data(&bar1min, "1min");  // 临时注释
+                write_bar_to_csv(&bar1min, "1min");  // 临时CSV输出
 
                 // ④ 及时投喂 5 min 聚合器
                 if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
-                    kafka_client::send_bar_data(&bar5min, "5min");
+                    // kafka_client::send_bar_data(&bar5min, "5min");  // 临时注释
+                    write_bar_to_csv(&bar5min, "5min");  // 临时CSV输出
                 }
             }
         } else {
@@ -129,15 +222,18 @@ fn multi_contract_loop(
 
     // ---------- 程序退出前：flush 最后一批 ----------
     for bar1min in manager.flush_all_bar1min_active() {
-        kafka_client::send_bar_data(&bar1min, "1min");
+        // kafka_client::send_bar_data(&bar1min, "1min");  // 临时注释
+        write_bar_to_csv(&bar1min, "1min");  // 临时CSV输出
         if let Some(bar5min) = manager.on_bar_1min(&bar1min) {
-            kafka_client::send_bar_data(&bar5min, "5min");
+            // kafka_client::send_bar_data(&bar5min, "5min");  // 临时注释
+            write_bar_to_csv(&bar5min, "5min");  // 临时CSV输出
         }
     }
 
     // 最后确保剩余 5 min bar 也 flush
     for bar5min in manager.flush_all_bar5min_active() {
-        kafka_client::send_bar_data(&bar5min, "5min");
+        // kafka_client::send_bar_data(&bar5min, "5min");  // 临时注释
+        write_bar_to_csv(&bar5min, "5min");  // 临时CSV输出
     }
 
     Ok(())

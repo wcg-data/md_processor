@@ -20,6 +20,7 @@ ctrlc = "3.4"
 clickhouse = "0.3.0"
 anyhow = "1.0"
 once_cell = "1.19.0"
+lazy_static = "1.4"
 schema_registry_converter = { version = "4.0", features = ["avro"] }
 csv = "1.3"
 rayon = "1.10"
