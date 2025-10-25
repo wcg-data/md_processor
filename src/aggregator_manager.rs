@@ -41,6 +41,11 @@ impl AggregatorManager {
         }
     }
 
+    /// 获取当前活跃合约集合的引用
+    pub fn get_active_contracts(&self) -> &HashSet<String> {
+        &self.active_contracts
+    }
+
     pub fn on_tick(&mut self, tick: &mut TickData) -> Option<BarData> {
         if !Bar1MinAggregator::validate_tick(tick) {
             return None;
@@ -99,6 +104,38 @@ impl AggregatorManager {
                 bars_5min.push(b5);
             }
         }
+        bars_5min
+    }
+
+    /// 收盘时flush指定合约的1min和5min bar
+    /// 用于交易时段结束时主动刷新，避免5min窗口遗漏最后一根bar
+    pub fn flush_contracts_session_ended(&mut self, contracts: &[String]) -> Vec<BarData> {
+        let mut bars_5min = Vec::new();
+
+        for contract in contracts {
+            // 1. flush 该合约的 1min bar
+            if let Some(aggr1) = self.bar1min_aggregators.get_mut(contract) {
+                if let Some(bar1min) = aggr1.flush() {
+                    // 2. 将 1min bar 喂入 5min 聚合器
+                    let aggr5 = self
+                        .bar5min_aggregators
+                        .entry(contract.clone())
+                        .or_insert_with(Bar5MinAggregator::new);
+
+                    if let Some(b5) = aggr5.on_bar_1min(&bar1min) {
+                        bars_5min.push(b5);
+                    }
+                }
+            }
+
+            // 3. flush 该合约的 5min bar（确保最后一个窗口被输出）
+            if let Some(aggr5) = self.bar5min_aggregators.get_mut(contract) {
+                if let Some(bar5min) = aggr5.flush() {
+                    bars_5min.push(bar5min);
+                }
+            }
+        }
+
         bars_5min
     }
 }

@@ -50,9 +50,15 @@ pub fn floor_to_1min(ts: &DateTime<Utc>) -> DateTime<Utc> {
     ts.with_second(0).unwrap().with_nanosecond(0).unwrap()
 }
 
+/// 将时间向上取整到5分钟边界（右边界，符合行业标准）
+/// 例如：22:51-22:55 → 22:55, 22:56-23:00 → 23:00
 pub fn floor_to_5min(dt: &DateTime<Utc>) -> DateTime<Utc> {
     let ts = dt.timestamp();
-    Utc.timestamp_opt(ts - (ts % 300), 0).single().unwrap()
+    // 向上取整到5分钟边界：((ts + 299) / 300) * 300
+    // 如果ts已经是边界（如22:55:00），保持不变
+    // 如果ts不是边界（如22:51:00），向上取整到下一个边界（22:55:00）
+    let ceiled = ((ts + 299) / 300) * 300;
+    Utc.timestamp_opt(ceiled, 0).single().unwrap()
 }
 
 /// 从 Polars AnyValue 转换时间戳为 NaiveDateTime

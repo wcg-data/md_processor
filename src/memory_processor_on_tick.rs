@@ -12,6 +12,7 @@ use md_processor::shared_memory::map_shared_ring_buffer;
 use md_processor::ring_buffer::SharedRingBuffer;
 use md_processor::bar1min_aggregator::Bar1MinAggregator;
 use md_processor::aggregator_manager::AggregatorManager;
+use md_processor::trade_session_loader::TRADE_SESSION_MAP;
 // use md_processor::kafka_client;  // 临时注释，后续改回Kafka时取消注释
 use md_processor::md_structures::BarData;
 
@@ -181,6 +182,7 @@ fn multi_contract_loop(
 ) -> anyhow::Result<()> {
     let mut manager = AggregatorManager::new();
     let mut last_minute = Local::now().minute();
+    let mut prev_active_contracts: HashSet<String> = HashSet::new();
 
     while running.load(Ordering::SeqCst) {
         let now_minute = Local::now().minute();
@@ -188,6 +190,31 @@ fn multi_contract_loop(
         // ---------------- 每分钟触发 ----------------
         if now_minute != last_minute {
             last_minute = now_minute;
+
+            // 更新活跃合约状态
+            let now_naive = Local::now().naive_local();
+            manager.update_active_contracts(&TRADE_SESSION_MAP, now_naive);
+
+            // 检测交易时段结束的合约（之前活跃，现在不活跃）
+            let current_active = manager.get_active_contracts().clone();
+            let ended_contracts: Vec<String> = prev_active_contracts
+                .iter()
+                .filter(|c| !current_active.contains(*c))
+                .cloned()
+                .collect();
+
+            // 刷新交易时段结束的合约（确保最后的5min窗口被输出）
+            if !ended_contracts.is_empty() {
+                println!("检测到 {} 个合约交易时段结束，主动flush: {:?}",
+                    ended_contracts.len(), ended_contracts);
+                for bar5min in manager.flush_contracts_session_ended(&ended_contracts) {
+                    // kafka_client::send_bar_data(&bar5min, "5min");  // 临时注释
+                    write_bar_to_csv(&bar5min, "5min");  // 临时CSV输出
+                }
+            }
+
+            // 更新前一分钟的活跃合约集合
+            prev_active_contracts = current_active;
 
             // ① flush 1 min bar（活跃合约）
             for bar1min in manager.flush_all_bar1min_active() {

@@ -508,10 +508,15 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
 
 // =================================1min到5min合并====================================
 
-/// 将NaiveDateTime向下取整到5分钟边界
+/// 将NaiveDateTime向上取整到5分钟边界（右边界，符合行业标准）
+/// 例如：22:51-22:55 → 22:55, 22:56-23:00 → 23:00
 fn floor_to_5min_naive(dt: &NaiveDateTime) -> NaiveDateTime {
     let ts = dt.and_utc().timestamp();
-    DateTime::from_timestamp(ts - (ts % 300), 0).unwrap().naive_utc()
+    // 向上取整到5分钟边界：((ts + 299) / 300) * 300
+    // 如果ts已经是边界（如22:55:00），保持不变
+    // 如果ts不是边界（如22:51:00），向上取整到下一个边界（22:55:00）
+    let ceiled = ((ts + 299) / 300) * 300;
+    DateTime::from_timestamp(ceiled, 0).unwrap().naive_utc()
 }
 
 /// 将1分钟bar聚合为5分钟bar
