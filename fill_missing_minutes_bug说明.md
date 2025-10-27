@@ -133,6 +133,35 @@ match field_name {
 2. 补全bar的`open_interest`延续前一个bar的值
 3. 重新生成所有数据
 
-## 遗留问题
+## ✅ 修复完成（2025-10-27）
 
-为什么有些补全bar的oi不是2？需要进一步调查批量生成逻辑。
+### 修改内容
+
+**common_utils.rs**:
+1. Line 168: 改变`existing_data`类型为`HashMap<String, (usize, f64, u32)>`，新增open_interest字段
+2. Line 173: 添加`open_interests`列读取
+3. Line 186-190: 提取open_interest值
+4. Line 243-245: 添加`missing_open_interests`向量和`last_open_interest`追踪变量
+5. Line 274-284: 更新遍历逻辑，追踪和保存open_interest
+6. Line 319-322: 添加open_interest的专门处理，延续前一个bar的值
+
+### 验证结果
+
+**测试用例**（IF1706）:
+```
+✅ 2016-10-24 09:31:00: oi=2（正确延续）
+✅ 2016-10-24 09:50:00: oi=35（之前错误为2，现修复）
+✅ 2016-10-24 10:25:00: oi=79（之前错误为2，现修复）
+✅ 2016-10-24 13:00:00: oi=114（之前错误为2，现修复）
+```
+
+**补全bar特征**：
+- volume = 0
+- turnover = 0.0
+- open_interest_diff = 0
+- open_interest = 延续前一个bar的值 ✅
+- close/open/high/low = 延续前一个bar的close
+
+### 影响范围
+
+修复后所有补全bar的open_interest正确延续前一个bar的值，不再影响数据一致性。
