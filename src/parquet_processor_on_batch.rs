@@ -3,8 +3,8 @@
 //
 // 集合竞价处理说明:
 //   - 已修复第一个bar的open_interest_diff计算（现为0而不是OI本身）
-//   - 暂不支持生成独立的集合竞价bar（向量化实现较复杂）
-//   - 如需精确的集合竞价处理，请使用parquet_processor_on_tick
+//   - ✅ 支持集合竞价tick过滤（2025-10-27修复）
+//   - 集合竞价tick会被正常聚合到对应的分钟bar中
 
 use std::path::Path;
 
@@ -191,10 +191,11 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
         _ => return Err(anyhow::anyhow!("无法获取品种代码")),
     };
 
-    // 获取该品种的交易时间范围
+    // 获取该品种的交易时间范围和集合竞价时段
     let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
+    let auction_periods = (*TRADE_SESSION_MAP).get_auction_periods(&current_comd);
 
-    if !trading_ranges.is_empty() {
+    if !trading_ranges.is_empty() || !auction_periods.is_empty() {
         // 快速批量过滤：使用向量化操作提取时间列，然后批量检查
         let mut valid_indices = Vec::new();
         let trade_time_col = result_df.column("trade_time")?;
@@ -216,10 +217,14 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
                     _ => continue,
                 };
 
-                // 检查时间是否在任一交易时段内
-                let is_valid = trading_ranges.iter().any(|(start, end)| {
+                // 检查时间是否在交易时段或集合竞价时段内
+                let is_in_trading = trading_ranges.iter().any(|(start, end)| {
                     time_part >= *start && time_part <= *end
                 });
+                let is_in_auction = auction_periods.iter().any(|(start, end)| {
+                    time_part >= *start && time_part < *end  // 集合竞价用 < end
+                });
+                let is_valid = is_in_trading || is_in_auction;
 
                 if is_valid {
                     valid_indices.push(i as u32);

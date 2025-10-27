@@ -42,10 +42,25 @@ impl Bar1MinAggregator {
 
         if let Some(opening_time) = auction_opening {
             // 在集合竞价时段内
-            self.auction_ticks.push(*tick);
-            self.in_auction_period = true;
-            self.auction_opening_time = Some(opening_time);
-            return None;  // 集合竞价时段不生成bar，继续累积ticks
+            if !self.in_auction_period {
+                // 第一次进入集合竞价：先flush前一个连续交易窗口（如果有）
+                let prev_bar = if self.last_tick.is_some() {
+                    self.flush()
+                } else {
+                    None
+                };
+
+                // 开始累积集合竞价ticks
+                self.auction_ticks.push(*tick);
+                self.in_auction_period = true;
+                self.auction_opening_time = Some(opening_time);
+
+                return prev_bar;  // 返回前一个连续交易bar（如果有）
+            } else {
+                // 已经在集合竞价时段内，继续累积
+                self.auction_ticks.push(*tick);
+                return None;
+            }
         } else if self.in_auction_period {
             // 刚离开集合竞价时段（第一个连续交易tick）
             // 生成集合竞价bar，然后处理当前tick
