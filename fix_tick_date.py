@@ -87,11 +87,11 @@ def fix_date_field(df, comd, sessions, trading_calendar_set, trading_dates_list)
     """
     修正date字段为交易日（向量化优化版本）
 
-    逻辑：
+    逻辑（基于交易所规则：节假日前不会有夜盘）：
     - 无夜盘品种：date保持不变
     - 有夜盘品种：
-      - hour >= 21：date += 1天（简化版，忽略节假日，对大部分情况适用）
-      - hour < 3 且非交易日：date += 1天
+      - hour >= 21：date = 次日（如果次日是周六/日，则顺延到周一）
+      - hour < 3：date = 当日（如果当日是周六/日，则顺延到周一）
       - 其他：date = trade_time.date()
     """
     # 检查是否有夜盘
@@ -106,20 +106,32 @@ def fix_date_field(df, comd, sessions, trading_calendar_set, trading_dates_list)
         pl.col('trade_time').dt.date().cast(pl.Utf8).alias('natural_date')
     ])
 
-    # 向量化修正逻辑（简化版本：直接+1天）
+    # 向量化修正逻辑：处理夜盘和周末
     df = df.with_columns([
         pl.when(pl.col('hour') >= 21)
         # 夜盘：date = 次日
-        .then((pl.col('natural_date_obj') + pl.duration(days=1)).cast(pl.Utf8))
-        .when((pl.col('hour') < 3))
-        # 凌晨：保持当日（假设已经跨到交易日了）
-        .then(pl.col('natural_date'))
-        .otherwise(pl.col('natural_date'))
+        .then(pl.col('natural_date_obj') + pl.duration(days=1))
+        .when(pl.col('hour') < 3)
+        # 凌晨：保持当日
+        .then(pl.col('natural_date_obj'))
+        .otherwise(pl.col('natural_date_obj'))
+        .alias('temp_date_obj')
+    ])
+
+    # 处理周末：周六+2天，周日+1天
+    # 注意：Polars的weekday定义：1=周一, 2=周二, ..., 6=周六, 7=周日
+    df = df.with_columns([
+        pl.when(pl.col('temp_date_obj').dt.weekday() == 6)  # 周六
+        .then(pl.col('temp_date_obj') + pl.duration(days=2))
+        .when(pl.col('temp_date_obj').dt.weekday() == 7)  # 周日
+        .then(pl.col('temp_date_obj') + pl.duration(days=1))
+        .otherwise(pl.col('temp_date_obj'))
+        .cast(pl.Utf8)
         .alias('date')
     ])
 
     # 删除临时列
-    df = df.drop(['hour', 'natural_date', 'natural_date_obj'])
+    df = df.drop(['hour', 'natural_date', 'natural_date_obj', 'temp_date_obj'])
 
     return df
 
