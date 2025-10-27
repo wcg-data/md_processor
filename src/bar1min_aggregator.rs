@@ -43,9 +43,20 @@ impl Bar1MinAggregator {
         if let Some(opening_time) = auction_opening {
             // 在集合竞价时段内
             if !self.in_auction_period {
-                // 第一次进入集合竞价：先flush前一个连续交易窗口（如果有）
+                // 第一次进入集合竞价：检查是否需要flush前一个连续交易窗口
                 let prev_bar = if self.last_tick.is_some() {
-                    self.flush()
+                    // 检查是否同一天（通过比较日期字符串）
+                    let prev_date = to_string_field(&self.last_tick.unwrap().date);
+                    let curr_date = to_string_field(&tick.date);
+
+                    if prev_date == curr_date {
+                        // 同一天：flush前一个窗口（如日盘结束后的夜盘集合竞价）
+                        self.flush()
+                    } else {
+                        // 跨天：不flush，避免生成超出交易时段的bar
+                        // 让prev_last_tick保持为前一天最后一个bar的last_tick
+                        None
+                    }
                 } else {
                     None
                 };

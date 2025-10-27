@@ -341,6 +341,55 @@ fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String
     Ok((grouped_df, contract, comd, exchange))
 }
 
+/// 过滤掉超出交易时段的bar（在计算oi_diff之前调用，避免shift拿到超时bar的oi）
+fn filter_trading_hours_bars(df: DataFrame, comd: &str) -> anyhow::Result<DataFrame> {
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(comd);
+    let auction_periods = (*TRADE_SESSION_MAP).get_auction_periods(comd);
+
+    if trading_ranges.is_empty() && auction_periods.is_empty() {
+        // 没有时段限制，直接返回
+        return Ok(df);
+    }
+
+    let mut valid_indices = Vec::new();
+    let trade_time_col = df.column("trade_time")?;
+
+    for i in 0..df.height() {
+        if let Ok(any_val) = trade_time_col.get(i) {
+            let time_part = match any_val {
+                AnyValue::String(v) => {
+                    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S") {
+                        naive_dt.time()
+                    } else {
+                        continue;
+                    }
+                },
+                _ => continue,
+            };
+
+            // 检查时间是否在交易时段或集合竞价时段内
+            let is_in_trading = trading_ranges.iter().any(|(start, end)| {
+                time_part >= *start && time_part <= *end
+            });
+            let is_in_auction = auction_periods.iter().any(|(start, end)| {
+                time_part >= *start && time_part < *end
+            });
+            let is_valid = is_in_trading || is_in_auction;
+
+            if is_valid {
+                valid_indices.push(i as u32);
+            }
+        }
+    }
+
+    if valid_indices.is_empty() {
+        return Err(anyhow::anyhow!("过滤后bar数据为空"));
+    }
+
+    let filtered_df = df.take(&ChunkedArray::from_vec("", valid_indices))?;
+    Ok(filtered_df)
+}
+
 /// 向量化计算跨窗口指标
 fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exchange: &str) -> anyhow::Result<DataFrame> {
     // 先执行shift操作
@@ -370,7 +419,7 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
                 .otherwise(col("last_turnover") - col("prev_turnover"))  // 正常差分
                 .fill_null(col("last_turnover").fill_null(0.0))  // 第一个bar用当前值
                 .alias("turnover"),
-            
+
             // 计算open_interest_diff
             // 修正：第一个bar（prev为NULL）时，oi_diff应该为0（无前置bar无法计算差分）
             // 之前错误地使用last_open_interest，导致第一个bar的oi_diff等于OI本身
@@ -580,6 +629,9 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
 
     // 5. 执行分组聚合（向量化），提取常量字段
     let (grouped_df, contract, comd, exchange) = perform_group_aggregation(df_with_minute)?;
+
+    // 5.5. 过滤掉超出交易时段的bar（必须在计算oi_diff之前，避免shift拿到超时bar的oi）
+    let grouped_df = filter_trading_hours_bars(grouped_df, &comd)?;
 
     // 6. 执行跨窗口计算（向量化）
     let mut bars_df = build_bars_vectorized(grouped_df, &contract, &comd, &exchange)?;
