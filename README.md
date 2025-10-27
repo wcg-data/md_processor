@@ -7,6 +7,7 @@
 MD Processor 是一个专业的量化交易基础设施组件，设计用于：
 - 从共享内存读取华泰证券市场快照 tick 数据
 - 实时聚合 tick 数据为 1 分钟和 5 分钟 K 线
+- **支持集合竞价独立bar生成**（符合专业平台标准）
 - 通过 Kafka 发布处理后的数据
 - 支持 Parquet 格式数据处理和存储
 - 提供 ClickHouse 数据库存储支持
@@ -27,12 +28,12 @@ MD Processor 是一个专业的量化交易基础设施组件，设计用于：
 ## 核心模块
 
 ### 可执行程序（统一命名：数据源_processor_on_模式）
-- `memory_processor_on_tick.rs` - 实时共享内存逐tick处理（177行，自包含）
-- `parquet_processor_on_batch.rs` - 离线批量并行处理（970行，自包含）
-- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（224行，自包含）
+- `memory_processor_on_tick.rs` - 实时共享内存逐tick处理
+- `parquet_processor_on_batch.rs` - 离线批量并行处理（支持1min和5min）
+- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（**支持集合竞价**）
 
 ### 数据处理库
-- `bar1min_aggregator.rs` - 1 分钟 K 线聚合器（包含 validate_tick 过滤函数）
+- `bar1min_aggregator.rs` - 1 分钟 K 线聚合器（包含 validate_tick 过滤函数，支持集合竞价）
 - `bar5min_aggregator.rs` - 5 分钟 K 线聚合器
 - `aggregator_manager.rs` - 多合约聚合管理器
 
@@ -40,7 +41,7 @@ MD Processor 是一个专业的量化交易基础设施组件，设计用于：
 - `shared_memory.rs` - 共享内存映射，支持跨进程通信
 - `ring_buffer.rs` - 无锁环形缓冲区实现
 - `kafka_client.rs` - Kafka 生产者客户端
-- `trade_session_loader.rs` - 交易时段配置加载器
+- `trade_session_loader.rs` - 交易时段配置加载器（支持集合竞价时段）
 - `md_structures.rs` - 数据结构定义（C++兼容）
 - `common_utils.rs` - 共享工具函数
 
@@ -87,14 +88,17 @@ cargo run --bin test_kafka           # Kafka 测试工具
 # 1. 实时行情处理（连接到共享内存）
 ./target/release/memory_processor_on_tick MD_SNAPSHOT_HUATAI
 
-# 2. 批量处理历史数据（从 Parquet 文件）
-# on_batch: 向量化批处理（推荐，性能更高）
-cargo run --bin parquet_processor_on_batch dongzheng_data 1min bb1710
+# 2. 批量处理历史数据
+# 一键处理所有合约（tick→1min→5min→主力合约）
+./script/process_all_contracts.sh                  # 64线程处理全部8712个合约
+./script/process_all_contracts.sh --skip-clean     # 增量处理
+./script/process_all_contracts.sh --threads 32     # 自定义线程数
 
-# on_tick: 流式逐 tick 处理（用于验证一致性）
-cargo run --bin parquet_processor_on_tick dongzheng_data 1min bb1710
+# 单个合约处理
+./target/release/parquet_processor_on_batch dongzheng_data 1min bb1710    # 批量处理
+./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706     # 流式处理（支持集合竞价）
 
-# 3. 对比两种处理器结果
+# 3. 对比验证
 python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
 
 # 4. 更新交易时段配置
@@ -237,19 +241,58 @@ cargo clippy            # 代码质量检查
 3. 提交更改
 4. 发起 Pull Request
 
+## 🎯 集合竞价功能
+
+**parquet_processor_on_tick** 完整支持中国期货市场集合竞价独立bar生成，符合专业金融数据平台（聚宽/米筐）标准。
+
+### 支持的集合竞价时段
+- **股指期货（CFFEX）**: 09:25-09:30 → 09:30:00 bar
+- **商品期货日盘**: 08:55-09:00 → 09:00:00 bar
+- **夜盘**: 20:55-21:00 → 21:00:00 bar
+
+### 核心特性
+- ✅ **数据驱动**：仅在实际有集合竞价tick时生成bar
+- ✅ **自动推断**：未配置auction_time时根据opening_time自动推断
+- ✅ **节假日适配**：自动处理节前停夜盘、节后恢复夜盘
+- ✅ **Volume重置**：自动检测夜盘→日盘的volume重置（如800→300）
+
+### 集合竞价bar特征
+- `timestamp`: 开盘时间（09:00/09:30/21:00）
+- `volume`: 集合竞价累计成交量
+- `open_interest_diff`: 0（无前置bar）
+- `prev_close`: NaN
+- `log_return`: NaN
+
+### 测试验证
+```bash
+# 测试股指集合竞价（09:30）
+./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706
+
+# 测试商品夜盘集合竞价（21:00）
+./target/release/parquet_processor_on_tick dongzheng_data 1min ag1301
+```
+
+详见：[集合竞价功能实现总结.md](集合竞价功能实现总结.md)
+
 ## 📚 文档
 
 项目包含详细的技术文档，位于 `docs/` 目录：
 
 ### 核心文档
 
-1. **[validate_tick_过滤规则.md](docs/validate_tick_过滤规则.md)**
+1. **[集合竞价功能实现总结.md](集合竞价功能实现总结.md)** ⭐ 新增
+   - 集合竞价独立bar生成功能详解
+   - 支持的集合竞价时段和特征
+   - 节假日场景自动适配
+   - 测试验证结果
+
+2. **[validate_tick_过滤规则.md](docs/validate_tick_过滤规则.md)**
    - tick 数据过滤规则完整说明（v1.4）
    - 9 个启用规则 + 4 个禁用规则
-   - 三层过滤策略：数据质量检查 + 数据清理 + 交易时段过滤
+   - 三层过滤策略：数据质量检查 + 数据清理 + 时段过滤（含集合竞价）
    - on_batch 和 on_tick 一致性保证
 
-2. **[trade_session_更新工具使用指南.md](docs/trade_session_更新工具使用指南.md)**
+3. **[trade_session_更新工具使用指南.md](docs/trade_session_更新工具使用指南.md)**
    - 交易时段配置自动更新工具
    - 支持 168 个品种，6 个交易所
    - 集合竞价时间自动推断

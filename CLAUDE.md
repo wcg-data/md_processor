@@ -10,35 +10,24 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 - 交易时段过滤和缺失分钟补全
 - 集合竞价独立bar生成（on_tick支持，符合行业标准）
 
-## 常用命令
+## 数据处理工作流
 
+### 批量处理所有合约
 ```bash
-# 编译
-cargo build --release
-./script/build.sh  # 或使用脚本
-
-# 批量处理所有合约（完整流程：tick→1min→5min→主力合约）
+# 完整流程：tick→1min→5min→主力合约
 ./script/process_all_contracts.sh                  # 重新生成所有数据（64线程）
 ./script/process_all_contracts.sh --skip-clean     # 增量处理
 ./script/process_all_contracts.sh --threads 32     # 自定义线程数
+```
 
-# on_batch处理（批量并行，推荐）
-./target/release/parquet_processor_on_batch dongzheng_data 1min      # tick→1min, 4线程
-./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # tick→1min, 8线程
-./target/release/parquet_processor_on_batch dongzheng_data 5min 8    # 1min→5min, 8线程
-./target/release/parquet_processor_on_batch dongzheng_data 1min bb1710  # 单合约
+### 处理器选择
+```bash
+# on_batch：批量并行处理（推荐，性能高）
+./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # 8线程
+./target/release/parquet_processor_on_batch dongzheng_data 5min 8    # 1min→5min
 
-# on_tick处理（单合约，完整支持集合竞价）
-./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706
-
-# 生成主力合约数据
-python3 /root/project/md_toolkit/processors/gen_main_bars.py --freqs 1min 5min
-
-# 对比验证
-python3 /root/project/md_toolkit/tools/validators/compare_bar_processors.py bb1710
-
-# 更新交易时段配置
-python3 update_trade_session.py
+# on_tick：逐tick流式处理（支持集合竞价，用于验证一致性）
+./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706  # 测试集合竞价
 ```
 
 ## 核心模块
