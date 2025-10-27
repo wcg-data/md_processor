@@ -164,21 +164,31 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     // 先按时间排序原始数据
     let sorted_bars = bars_df.sort(["trade_time"], SortMultipleOptions::default())?;
 
-    // 收集现有数据信息
-    let mut existing_data: HashMap<String, (usize, f64)> = HashMap::new();
+    // 收集现有数据信息（包括close和open_interest）
+    let mut existing_data: HashMap<String, (usize, f64, u32)> = HashMap::new();
     let mut date_range: HashSet<NaiveDate> = HashSet::new();
 
     let trade_times = sorted_bars.column("trade_time")?;
     let close_prices = sorted_bars.column("close")?;
+    let open_interests = sorted_bars.column("open_interest")?;
 
     for i in 0..trade_times.len() {
-        if let (AnyValue::String(time_str), close_val) = (trade_times.get(i).unwrap(), close_prices.get(i).unwrap()) {
+        if let (AnyValue::String(time_str), close_val, oi_val) = (
+            trade_times.get(i).unwrap(),
+            close_prices.get(i).unwrap(),
+            open_interests.get(i).unwrap()
+        ) {
             if let Ok(parsed) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
                 let close_price = match close_val {
                     AnyValue::Float64(price) => price,
                     _ => 0.0,
                 };
-                existing_data.insert(time_str.to_string(), (i, close_price));
+                let open_interest = match oi_val {
+                    AnyValue::UInt32(oi) => oi,
+                    AnyValue::UInt64(oi) => oi as u32,
+                    _ => 0u32,
+                };
+                existing_data.insert(time_str.to_string(), (i, close_price, open_interest));
                 date_range.insert(parsed.date());
             }
         }
@@ -230,7 +240,9 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     let mut existing_indices = Vec::<u32>::new();
     let mut missing_times = Vec::<String>::new();
     let mut missing_prev_closes = Vec::<f64>::new();
+    let mut missing_open_interests = Vec::<u32>::new();
     let mut last_close_price = 0.0f64;
+    let mut last_open_interest = 0u32;
     let mut has_seen_first_trade = false;
 
     // 首先找到第一个有成交的时间点
@@ -259,15 +271,17 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
 
         let time_str = time_point.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        if let Some(&(row_idx, close_price)) = existing_data.get(&time_str) {
+        if let Some(&(row_idx, close_price, open_interest)) = existing_data.get(&time_str) {
             // 现有数据
             existing_indices.push(row_idx as u32);
             last_close_price = close_price;
+            last_open_interest = open_interest;
             has_seen_first_trade = true;
         } else if has_seen_first_trade {
             // 只在第一个有成交tick之后补全缺失的bar
             missing_times.push(time_str);
             missing_prev_closes.push(last_close_price);
+            missing_open_interests.push(last_open_interest);
         }
     }
 
@@ -295,12 +309,17 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
         // 预提取常用数据，避免重复克隆
         let missing_times_ref = &missing_times;
         let missing_prev_closes_ref = &missing_prev_closes;
+        let missing_open_interests_ref = &missing_open_interests;
 
         for (field_name, _) in schema.iter() {
             let series = match field_name.as_str() {
                 "trade_time" => Series::new("trade_time", missing_times_ref),
                 "volume" => Series::new("volume", vec![0u32; count]),
                 "turnover" => Series::new("turnover", vec![0.0f64; count]),
+                "open_interest" => {
+                    // 延续前一个bar的open_interest值
+                    Series::new("open_interest", missing_open_interests_ref.clone())
+                },
                 "open_interest_diff" => Series::new("open_interest_diff", vec![0i32; count]),
                 "log_return" => {
                     // 延续价格情况下，log_return为0

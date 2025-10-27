@@ -137,6 +137,14 @@ impl Bar1MinAggregator {
         let date = to_string_field(&last_tick.date);
         let trade_time = opening_time.format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // 计算oi_diff：只有文件第一个bar为0，其余所有bar（包括集合竞价）计算真实diff
+        let oi_diff = if let Some(prev) = &self.prev_last_tick {
+            last_tick.open_interest.wrapping_sub(prev.open_interest) as i32
+        } else {
+            // 文件第一个bar，无前置数据
+            0
+        };
+
         let bar = BarData {
             contract: contract.clone(),
             contract_yymm: extract_contract_yymm(&contract, &date),
@@ -153,7 +161,7 @@ impl Bar1MinAggregator {
             volume,
             turnover,
             open_interest: last_tick.open_interest,
-            open_interest_diff: 0,  // 集合竞价bar的oi_diff=0
+            open_interest_diff: oi_diff,  // 完全连续计算（方案A）
             bid_price_1: last_tick.bid_price_1,
             bid_volume_1: last_tick.bid_volume_1,
             ask_price_1: last_tick.ask_price_1,
