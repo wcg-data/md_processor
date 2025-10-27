@@ -20,6 +20,10 @@ pub struct Bar1MinAggregator {
     pub low: Option<f64>,
     // 缓存解析后的时间，避免重复解析
     cached_tick_time: Option<DateTime<Utc>>,
+    // 集合竞价相关字段
+    auction_ticks: Vec<TickData>,       // 集合竞价时段的tick缓冲区
+    in_auction_period: bool,            // 当前是否在集合竞价时段
+    auction_opening_time: Option<NaiveDateTime>, // 当前集合竞价对应的开盘时间
 }
 
 impl Bar1MinAggregator {
@@ -31,6 +35,34 @@ impl Bar1MinAggregator {
         // 缓存时间解析结果
         let tick_time = Self::parse_datetime_from_tick(tick)?;
         self.cached_tick_time = Some(tick_time);
+        let tick_naive = tick_time.naive_utc();
+
+        // 检查是否在集合竞价时段
+        let auction_opening = Self::check_auction_period(tick, &tick_naive);
+
+        if let Some(opening_time) = auction_opening {
+            // 在集合竞价时段内
+            self.auction_ticks.push(*tick);
+            self.in_auction_period = true;
+            self.auction_opening_time = Some(opening_time);
+            return None;  // 集合竞价时段不生成bar，继续累积ticks
+        } else if self.in_auction_period {
+            // 刚离开集合竞价时段（第一个连续交易tick）
+            // 生成集合竞价bar，然后处理当前tick
+            let auction_bar = self.flush_auction_bar();
+
+            // 重置集合竞价状态
+            self.in_auction_period = false;
+            self.auction_opening_time = None;
+
+            // 处理当前tick（连续交易的第一个tick）
+            let tick_minute = floor_to_1min(&tick_time);
+            self.init_bar_window(tick, tick_minute);
+
+            return auction_bar;
+        }
+
+        // 正常连续交易逻辑（未修改）
         let tick_minute = floor_to_1min(&tick_time);
 
         if let Some(current_bar_minute) = self.current_bar_minute {
@@ -62,6 +94,85 @@ impl Bar1MinAggregator {
             self.init_bar_window(tick, tick_minute);
             return None;
         }
+    }
+
+    /// 生成集合竞价bar
+    /// 特征：timestamp=开盘时间, volume=累计值, oi_diff=0
+    fn flush_auction_bar(&mut self) -> Option<BarData> {
+        if self.auction_ticks.is_empty() {
+            return None;  // 无集合竞价tick，跳过
+        }
+
+        let last_tick = *self.auction_ticks.last()?;
+        let opening_time = self.auction_opening_time?;
+
+        // 聚合OHLC
+        let open_price = self.auction_ticks[0].close;
+        let mut high_price = self.auction_ticks[0].close;
+        let mut low_price = self.auction_ticks[0].close;
+        let close_price = last_tick.close;
+
+        for tick in &self.auction_ticks {
+            if tick.close > high_price {
+                high_price = tick.close;
+            }
+            if tick.close < low_price {
+                low_price = tick.close;
+            }
+        }
+
+        // 集合竞价bar使用累计值，不做差分
+        let volume = last_tick.volume;
+        let turnover = last_tick.turnover;
+
+        // 检查volume是否为0，如果为0则跳过生成集合竞价bar
+        if volume == 0 {
+            self.auction_ticks.clear();
+            return None;
+        }
+
+        let contract = to_string_field(&last_tick.contract);
+        let comd = to_string_field(&last_tick.comd);
+        let exchange = to_string_field(&last_tick.exchange);
+        let date = to_string_field(&last_tick.date);
+        let trade_time = opening_time.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let bar = BarData {
+            contract: contract.clone(),
+            contract_yymm: extract_contract_yymm(&contract, &date),
+            comd,
+            exchange,
+            date,
+            trade_time,
+            open: open_price,
+            high: high_price,
+            low: low_price,
+            close: close_price,
+            prev_close: f64::NAN,  // 集合竞价bar无prev_close
+            pre_settle: last_tick.pre_settle,
+            volume,
+            turnover,
+            open_interest: last_tick.open_interest,
+            open_interest_diff: 0,  // 集合竞价bar的oi_diff=0
+            bid_price_1: last_tick.bid_price_1,
+            bid_volume_1: last_tick.bid_volume_1,
+            ask_price_1: last_tick.ask_price_1,
+            ask_volume_1: last_tick.ask_volume_1,
+            mid_price: last_tick.mid_price,
+            vwap: if volume == 0 { 0.0 } else { turnover / volume as f64 },
+            log_return: f64::NAN,  // 集合竞价bar无法计算log_return
+            maturity_month: 0,
+            maturity_day: 0,
+        };
+
+        // 更新prev_last_tick为集合竞价的最后一个tick
+        // 这样后续的连续交易bar可以正确计算差分
+        self.prev_last_tick = Some(last_tick);
+
+        // 清空集合竞价缓冲区
+        self.auction_ticks.clear();
+
+        Some(bar)
     }
 
     pub fn flush(&mut self) -> Option<BarData> {
@@ -152,10 +263,11 @@ impl Bar1MinAggregator {
             )
         } else {
             // 第一个bar：直接使用当前累计值，prev_close设为NaN
+            // 注意：第一个bar的oi_diff应该为0（没有前置bar无法计算差分）
             (
                 last_tick.volume,
                 last_tick.turnover,
-                last_tick.open_interest as i32,
+                0,  // 修正：第一个bar的oi_diff应该为0，而不是open_interest本身
                 f64::NAN  // 第一个bar的prev_close设为NaN（Parquet存储为NULL）
             )
         };
@@ -310,12 +422,28 @@ impl Bar1MinAggregator {
         let comd = to_string_field(&tick.comd); // 最昂贵的字符串分配
 
         // 判断是否在交易时间段内（依赖 TRADE_SESSION_MAP）
+        // 包括连续交易时段和集合竞价时段
         // 如果该品种没有交易时段配置，则跳过交易时段检查（允许通过）
         let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
         if trading_ranges.is_empty() {
             return true;  // 没有配置则不过滤
         }
-        TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc())
+
+        // 检查是否在连续交易时段
+        if TRADE_SESSION_MAP.is_in_trading_session(&comd, dt.naive_utc()) {
+            return true;
+        }
+
+        // 检查是否在集合竞价时段
+        let auction_periods = TRADE_SESSION_MAP.get_auction_periods(&comd);
+        let tick_time = dt.naive_utc().time();
+        for (auction_start, auction_end) in auction_periods {
+            if tick_time >= auction_start && tick_time < auction_end {
+                return true;  // 在集合竞价时段，允许通过
+            }
+        }
+
+        false  // 既不在连续交易时段，也不在集合竞价时段，过滤掉
     }
 
 
@@ -339,6 +467,27 @@ impl Bar1MinAggregator {
             .or_else(|_| NaiveDateTime::parse_from_str(&ts_str, "%Y-%m-%d %H:%M:%S"))
             .ok()
             .map(|naive| Utc.from_utc_datetime(&naive))
+    }
+
+    /// 检测tick是否在集合竞价时段
+    /// 返回 Some(opening_time) 如果在集合竞价时段，否则返回 None
+    fn check_auction_period(tick: &TickData, tick_datetime: &NaiveDateTime) -> Option<NaiveDateTime> {
+        let comd = to_string_field(&tick.comd);
+        let tick_time = tick_datetime.time();
+
+        // 获取该品种的集合竞价时段配置
+        let auction_periods = TRADE_SESSION_MAP.get_auction_periods(&comd);
+
+        for (auction_start, auction_end) in auction_periods {
+            // 检查tick时间是否在集合竞价时段内 [auction_start, auction_end)
+            if tick_time >= auction_start && tick_time < auction_end {
+                // 构造开盘时间：使用tick的日期 + auction_end时间
+                let opening_datetime = tick_datetime.date().and_time(auction_end);
+                return Some(opening_datetime);
+            }
+        }
+
+        None
     }
 
 }

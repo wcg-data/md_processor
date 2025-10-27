@@ -1,5 +1,10 @@
 // parquet_processor_on_batch.rs - 批量向量化处理tick数据生成1min/5min bar
 // 支持单合约处理和多线程并行批量处理
+//
+// 集合竞价处理说明:
+//   - 已修复第一个bar的open_interest_diff计算（现为0而不是OI本身）
+//   - 暂不支持生成独立的集合竞价bar（向量化实现较复杂）
+//   - 如需精确的集合竞价处理，请使用parquet_processor_on_tick
 
 use std::path::Path;
 
@@ -12,6 +17,91 @@ use std::sync::Arc;
 
 use md_processor::trade_session_loader::TRADE_SESSION_MAP;
 use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, extract_contract_yymm, parse_anyvalue_datetime};
+
+/// 为集合竞价时段生成独立的bar
+/// 返回 (auction_bars_df, non_auction_df)
+fn extract_and_build_auction_bars(df: DataFrame) -> anyhow::Result<(Option<DataFrame>, DataFrame)> {
+    if df.height() == 0 {
+        return Ok((None, df));
+    }
+
+    // 获取品种代码
+    let current_comd = match df.column("comd")?.get(0)? {
+        AnyValue::String(v) => v.to_string(),
+        _ => return Ok((None, df)),  // 无法获取品种代码，跳过集合竞价处理
+    };
+
+    // 获取该品种的集合竞价时段配置
+    let auction_periods = (*TRADE_SESSION_MAP).get_auction_periods(&current_comd);
+
+    if auction_periods.is_empty() {
+        return Ok((None, df));  // 无集合竞价配置，跳过
+    }
+
+    // 识别集合竞价tick和非集合竞价tick
+    let mut auction_indices = Vec::new();
+    let mut non_auction_indices = Vec::new();
+    let trade_time_col = df.column("trade_time")?;
+
+    for i in 0..df.height() {
+        if let Ok(any_val) = trade_time_col.get(i) {
+            let tick_time = match any_val {
+                AnyValue::String(v) => {
+                    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f")
+                        .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S")) {
+                        naive_dt.time()
+                    } else {
+                        non_auction_indices.push(i as u32);
+                        continue;
+                    }
+                },
+                AnyValue::Datetime(v, _, _) => {
+                    let dt = parse_anyvalue_datetime(v);
+                    dt.time()
+                },
+                _ => {
+                    non_auction_indices.push(i as u32);
+                    continue;
+                },
+            };
+
+            // 检查是否在集合竞价时段
+            let is_auction = auction_periods.iter().any(|(start, end)| {
+                tick_time >= *start && tick_time < *end
+            });
+
+            if is_auction {
+                auction_indices.push(i as u32);
+            } else {
+                non_auction_indices.push(i as u32);
+            }
+        } else {
+            non_auction_indices.push(i as u32);
+        }
+    }
+
+    // 分离集合竞价和非集合竞价数据
+    let non_auction_df = if !non_auction_indices.is_empty() {
+        let indices_ca = UInt32Chunked::from_vec("", non_auction_indices);
+        df.take(&indices_ca)?
+    } else {
+        df.clone().clear()
+    };
+
+    if auction_indices.is_empty() {
+        return Ok((None, non_auction_df));  // 无集合竞价tick
+    }
+
+    // 暂时不实现集合竞价bar生成（batch处理器的向量化实现较复杂）
+    // on_tick处理器已完整支持集合竞价，如需精确处理请使用on_tick
+    // let _auction_df = {
+    //     let indices_ca = UInt32Chunked::from_vec("", auction_indices);
+    //     df.take(&indices_ca)?
+    // };
+
+    // TODO: 实现集合竞价bar生成逻辑
+    Ok((None, non_auction_df))
+}
 
 /// 从 parquet 文件加载并过滤数据
 fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<DataFrame> {
@@ -277,9 +367,10 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
                 .alias("turnover"),
             
             // 计算open_interest_diff
-            // 第一个bar（prev为NULL）时，使用last_open_interest作为oi_diff（与on_tick保持一致）
+            // 修正：第一个bar（prev为NULL）时，oi_diff应该为0（无前置bar无法计算差分）
+            // 之前错误地使用last_open_interest，导致第一个bar的oi_diff等于OI本身
             (col("last_open_interest").cast(DataType::Int64) - col("prev_open_interest").cast(DataType::Int64))
-                .fill_null(col("last_open_interest").cast(DataType::Int64))
+                .fill_null(lit(0))  // 第一个bar的oi_diff=0
                 .cast(DataType::Int32)
                 .alias("open_interest_diff"),
         ])
