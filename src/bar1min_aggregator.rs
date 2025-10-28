@@ -151,11 +151,8 @@ impl Bar1MinAggregator {
         let volume = last_tick.volume;
         let turnover = last_tick.turnover;
 
-        // 检查volume是否为0，如果为0则跳过生成集合竞价bar
-        if volume == 0 {
-            self.auction_ticks.clear();
-            return None;
-        }
+        // 修复：即使 volume=0 也生成bar，保留昨结算价等信息
+        // 删除了之前的跳过逻辑，确保数据连续性和 oi_diff 计算正确
 
         let contract = to_string_field(&last_tick.contract);
         let comd = to_string_field(&last_tick.comd);
