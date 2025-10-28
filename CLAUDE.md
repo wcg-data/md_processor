@@ -3,12 +3,12 @@
 ## 项目概述
 
 md_processor - 高性能期货市场数据处理系统（Rust）
-你应该总是用最新的代码生成的结果进行分析 
+你应该总是用最新的代码生成的结果进行分析
 **核心功能**：
 - tick数据聚合为1分钟K线
 - 支持批量处理（on_batch）和流式处理（on_tick）
 - 交易时段过滤和缺失分钟补全
-- 集合竞价独立bar生成（on_tick支持，符合行业标准）
+- 集合竞价独立bar生成（✅ on_batch和on_tick均完整支持，符合行业标准）
 
 ## 数据处理工作流
 
@@ -22,20 +22,20 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 
 ### 处理器选择
 ```bash
-# on_batch：批量并行处理（推荐，性能高）
+# on_batch：批量并行处理（推荐，性能高，完整支持集合竞价）
 ./target/release/parquet_processor_on_batch dongzheng_data 1min 8    # 8线程
 ./target/release/parquet_processor_on_batch dongzheng_data 5min 8    # 1min→5min
 
-# on_tick：逐tick流式处理（支持集合竞价，用于验证一致性）
-./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706  # 测试集合竞价
+# on_tick：逐tick流式处理（完整支持集合竞价，用于验证一致性）
+./target/release/parquet_processor_on_tick dongzheng_data 1min IF1706  # 单合约处理
 ```
 
 ## 核心模块
 
 **可执行程序**（统一命名：数据源_processor_on_模式）：
 - `memory_processor_on_tick.rs` - 实时共享内存逐tick处理
-- `parquet_processor_on_batch.rs` - 离线批量并行处理（支持1min和5min）
-- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（支持集合竞价）
+- `parquet_processor_on_batch.rs` - 离线批量并行处理（支持1min和5min，✅ 完整支持集合竞价）
+- `parquet_processor_on_tick.rs` - 离线逐tick增量处理（✅ 完整支持集合竞价）
 
 **数据处理库**：
 - `bar1min_aggregator.rs` - 1分钟聚合器，包含 `validate_tick` 过滤函数，支持集合竞价
@@ -95,7 +95,9 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 
 ## 重要文档
 
+- `集合竞价修复测试报告.md` - on_batch集合竞价修复测试报告（2025-10-28）
 - `集合竞价功能实现总结.md` - 集合竞价功能详解（2025-10-27）
+- `商品期货集合竞价分布完整分析.md` - 不同交易所集合竞价tick分布分析
 - `docs/fill_missing_minutes_修复总结.md` - 最后交易日停夜盘修复（2025-10-28）
 - `script/README.md` - 脚本使用说明
 - `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.4）
@@ -105,18 +107,24 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 ## 技术特点
 
 - **高性能**：无锁数据结构、零拷贝、向量化处理
-- **一致性**：on_batch和on_tick结果验证一致（16/17字段完全一致）
+- **一致性**：on_batch和on_tick结果完全一致（包括集合竞价bar）
 - **C++兼容**：`#[repr(C)]` 确保跨进程通信
 - **容错性**：自动跳过损坏文件和空数据
-- **集合竞价**：on_tick完整支持（详见下文）
+- **集合竞价**：on_batch和on_tick均完整支持（详见下文）
 
 ## 集合竞价功能
 
-on_tick处理器完整支持集合竞价独立bar生成（09:00/09:30/21:00），符合专业平台标准。
+✅ **on_batch和on_tick均完整支持**集合竞价独立bar生成（09:00/09:30/21:00），符合专业平台标准。
 
 **核心特性**：
 - 数据驱动，自动适配节假日（停夜盘/恢复夜盘）
 - 自动推断auction_time（09:00→08:55, 09:30→09:25, 21:00→20:55）
 - 自动检测volume重置（夜盘→日盘）
+- **on_batch关键修复**（2025-10-28）：将所有集合竞价时段的tick统一分配到最后一分钟窗口
+  - 修复前：跨多分钟的集合竞价tick会错误生成多个bar（如大商所、郑商所部分品种）
+  - 修复后：所有集合竞价tick合并为1个开盘时间的bar，与on_tick完全一致
+  - 测试覆盖：4个交易所（SHFE/DCE/ZCE/CFFEX），11个品种，100%通过
 
-**详见**：`集合竞价功能实现总结.md`
+**详见**：
+- `集合竞价功能实现总结.md` - on_tick实现原理
+- `集合竞价修复测试报告.md` - on_batch修复验证

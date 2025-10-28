@@ -147,9 +147,31 @@ impl Bar1MinAggregator {
             }
         }
 
-        // 集合竞价bar使用累计值，不做差分
-        let volume = last_tick.volume;
-        let turnover = last_tick.turnover;
+        // 计算volume和turnover增量（与on_batch逻辑一致）
+        // 使用 value < prev_value 检测重置（符合 volume&turnover累计规则说明.md）
+        let (volume, turnover) = if let Some(prev) = &self.prev_last_tick {
+            // 检测是否重置
+            // 根据文档，volume和turnover同步重置，但为了稳妥，分别检测
+            let volume_reset = last_tick.volume < prev.volume;
+            let turnover_reset = last_tick.turnover < prev.turnover;
+
+            let vol = if volume_reset {
+                last_tick.volume  // 重置（如夜盘集合竞价），直接使用累积值
+            } else {
+                last_tick.volume.saturating_sub(prev.volume)  // 正常差分（如日盘集合竞价）
+            };
+
+            let turn = if turnover_reset {
+                last_tick.turnover  // 重置，直接使用累积值
+            } else {
+                (last_tick.turnover - prev.turnover).max(0.0)  // 正常差分
+            };
+
+            (vol, turn)
+        } else {
+            // 第一个bar（文件开头），直接使用累积值
+            (last_tick.volume, last_tick.turnover)
+        };
 
         // 修复：即使 volume=0 也生成bar，保留昨结算价等信息
         // 删除了之前的跳过逻辑，确保数据连续性和 oi_diff 计算正确
