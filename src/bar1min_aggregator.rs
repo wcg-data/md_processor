@@ -236,11 +236,13 @@ impl Bar1MinAggregator {
                 let comd = to_string_field(&prev_last_tick.comd);
                 let exchange = to_string_field(&prev_last_tick.exchange);
                 let date = to_string_field(&prev_last_tick.date);
-                let trade_time = self.current_bar_minute
-                    .unwrap_or_else(|| Utc::now())
-                    .with_timezone(&*UTC_PLUS_8)  // 使用静态时区对象
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
+                // 修复：不进行时区转换，直接格式化
+                // current_bar_minute已经是正确的时间（UTC，但实际表示的是北京时间）
+                let trade_time = align_to_bar_minute(
+                    &self.current_bar_minute.unwrap_or_else(|| Utc::now())
+                )
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
 
                 // 空 bar 的 log_return 设为 0.0
                 let bar = BarData {
