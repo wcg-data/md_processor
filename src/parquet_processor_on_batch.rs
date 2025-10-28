@@ -190,8 +190,9 @@ fn create_minute_windows(mut df: DataFrame) -> anyhow::Result<DataFrame> {
         _ => return Err(anyhow::anyhow!("无法获取品种代码")),
     };
 
-    // 获取集合竞价时段配置
+    // 获取集合竞价时段和交易时段配置
     let auction_periods = (*TRADE_SESSION_MAP).get_auction_periods(&current_comd);
+    let trading_ranges = (*TRADE_SESSION_MAP).get_trading_ranges(&current_comd);
 
     let trade_times = df.column("trade_time")?;
     let minute_windows: Vec<String> = (0..df.height())
@@ -220,6 +221,17 @@ fn create_minute_windows(mut df: DataFrame) -> anyhow::Result<DataFrame> {
                         }
                     }
 
+                    // 检查是否是收盘时刻（time == session_end）
+                    // 修复：将收盘tick合并到前一分钟窗口，不生成独立的bar
+                    // 例如：23:00:00 → 合并到 22:59 窗口 → 23:00 bar包含完整收盘数据
+                    let mut is_closing_tick = false;
+                    for (_start, end) in &trading_ranges {
+                        if time_part == *end {
+                            is_closing_tick = true;
+                            break;
+                        }
+                    }
+
                     if is_auction {
                         // 集合竞价tick：分配到最后一分钟的窗口
                         // 例如：09:25-09:29的tick都分配到09:29窗口
@@ -227,6 +239,14 @@ fn create_minute_windows(mut df: DataFrame) -> anyhow::Result<DataFrame> {
                         let last_minute = auction_end_time - chrono::Duration::minutes(1);
                         let last_minute_window = naive.date().and_time(last_minute);
                         last_minute_window.format("%Y-%m-%d %H:%M:00").to_string()
+                    } else if is_closing_tick {
+                        // 收盘tick：合并到前一分钟窗口
+                        // 例如：23:00:00 → 分配到 22:59 窗口
+                        // 这样 23:00 bar 包含完整的收盘数据（包括收盘撮合）
+                        // 不会生成 23:01 bar，避免数据分散
+                        let prev_minute = time_part - chrono::Duration::minutes(1);
+                        let prev_minute_window = naive.date().and_time(prev_minute);
+                        prev_minute_window.format("%Y-%m-%d %H:%M:00").to_string()
                     } else {
                         // 正常tick：向下取整到分钟
                         let truncated = naive.with_second(0).unwrap().with_nanosecond(0).unwrap();
