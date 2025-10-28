@@ -198,10 +198,49 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
         return Ok(sorted_bars);
     }
 
-    // 一次遍历：生成时间序列的同时分离数据，避免重复遍历（修复夜盘跨日问题）
+    // ===== 修复：先识别哪些(日期, 时段)有原始数据 =====
+    // 只补全有原始bar的交易时段，避免在最后交易日停夜盘时错误补全
+    let mut session_has_data: HashSet<(NaiveDate, usize)> = HashSet::new();
+
+    for time_str in existing_data.keys() {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+            let time = dt.time();
+            let date = dt.date();
+
+            // 检查该bar属于哪个交易时段
+            for (session_idx, (start_time, end_time)) in trading_ranges.iter().enumerate() {
+                let in_session = if start_time > end_time {
+                    // 跨日时段（如21:00-02:30）
+                    time >= *start_time || time <= *end_time
+                } else {
+                    // 正常时段
+                    time >= *start_time && time <= *end_time
+                };
+
+                if in_session {
+                    // 标记该(日期, 时段)有数据
+                    session_has_data.insert((date, session_idx));
+
+                    // 如果是跨日时段的后半段（00:00-end_time），也要标记前一天的同一时段
+                    if start_time > end_time && time <= *end_time {
+                        let prev_date = date - chrono::Duration::days(1);
+                        session_has_data.insert((prev_date, session_idx));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 一次遍历：只为有原始数据的时段生成时间序列（修复最后交易日停夜盘问题）
     let mut complete_timeline: Vec<NaiveDateTime> = Vec::new();
     for date in &date_range {
-        for (start_time, end_time) in &trading_ranges {
+        for (session_idx, (start_time, end_time)) in trading_ranges.iter().enumerate() {
+            // 只补全有原始bar的时段
+            if !session_has_data.contains(&(*date, session_idx)) {
+                continue;
+            }
+
             if start_time > end_time {
                 // 跨日交易时段（如21:00-02:30）
                 // 第一段：当日start_time到23:59

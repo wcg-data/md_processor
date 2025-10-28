@@ -96,6 +96,7 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 ## 重要文档
 
 - `集合竞价功能实现总结.md` - 集合竞价功能详解（2025-10-27）
+- `docs/fill_missing_minutes_修复总结.md` - 最后交易日停夜盘修复（2025-10-28）
 - `script/README.md` - 脚本使用说明
 - `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.4）
 - `docs/trade_session_更新工具使用指南.md` - 交易时段配置
