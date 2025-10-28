@@ -50,7 +50,7 @@ impl Bar1MinAggregator {
                     let curr_date = to_string_field(&tick.date);
 
                     if prev_date == curr_date {
-                        // 同一天：flush前一个窗口（如日盘结束后的夜盘集合竞价）
+                        // 同一天:flush前一个窗口（如日盘结束后的夜盘集合竞价）
                         self.flush()
                     } else {
                         // 跨天：不flush，避免生成超出交易时段的bar

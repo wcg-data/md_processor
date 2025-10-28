@@ -1,0 +1,9 @@
+
+● 找到根本原因了！fill_missing_minutes的complete_timeline只包含交易时段（trading_ranges），不包含集合竞价时段。
+  所以即使auction bar被生成了，也会被fill_missing_minutes过滤掉，因为09:25不在complete_timeline中。
+
+
+
+● 明白了！原来auction bar的时间戳是09:30:00（opening_time），而09:30的连续交易bar被时间戳标记为09:31:00（因为al
+  ign_to_bar_minute会+1分钟）。这是正确的设计。
+  

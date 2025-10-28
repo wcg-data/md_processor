@@ -151,7 +151,6 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
         valid_ticks += 1;
 
         if let Some(bar) = aggregator.on_tick(&tick) {
-            // bar.print();
             bars.push(bar);
         }
     }

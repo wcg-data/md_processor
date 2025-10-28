@@ -243,46 +243,43 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
     let mut missing_open_interests = Vec::<u32>::new();
     let mut last_close_price = 0.0f64;
     let mut last_open_interest = 0u32;
-    let mut has_seen_first_trade = false;
 
-    // 首先找到第一个有成交的时间点
-    let mut first_trade_time: Option<NaiveDateTime> = None;
-    let volume_col = sorted_bars.column("volume")?;
-    for i in 0..volume_col.len() {
-        if let AnyValue::UInt32(vol) = volume_col.get(i)? {
-            if vol > 0 {
-                if let AnyValue::String(time_str) = trade_times.get(i).unwrap() {
-                    if let Ok(parsed) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
-                        first_trade_time = Some(parsed);
-                        break;
-                    }
-                }
-            }
+    // 合并existing_data和complete_timeline，按时间排序后统一处理
+    // 这样确保auction bar和trading bar都被正确处理，且last_close/oi的更新顺序正确
+    let mut all_times = std::collections::HashSet::new();
+
+    // 添加所有existing_data的时间
+    for time_str in existing_data.keys() {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+            all_times.insert(parsed);
         }
     }
 
-    for time_point in complete_timeline {
-        // 如果存在第一个有成交的时间点，且当前时间点在其之前，则跳过
-        if let Some(first_trade) = first_trade_time {
-            if time_point < first_trade {
-                continue; // 跳过第一个有成交tick之前的时间点
-            }
-        }
+    // 添加所有complete_timeline的时间
+    for time_point in &complete_timeline {
+        all_times.insert(*time_point);
+    }
 
+    // 排序所有时间点
+    let mut sorted_times: Vec<_> = all_times.into_iter().collect();
+    sorted_times.sort();
+
+    // 统一遍历所有时间点
+    for time_point in sorted_times {
         let time_str = time_point.format("%Y-%m-%d %H:%M:%S").to_string();
 
         if let Some(&(row_idx, close_price, open_interest)) = existing_data.get(&time_str) {
-            // 现有数据
+            // 现有bar：保留
             existing_indices.push(row_idx as u32);
             last_close_price = close_price;
             last_open_interest = open_interest;
-            has_seen_first_trade = true;
-        } else if has_seen_first_trade {
-            // 只在第一个有成交tick之后补全缺失的bar
+        } else if complete_timeline.contains(&time_point) && last_close_price > 0.0 {
+            // 缺失的trading_hours bar且有参考值：补全
             missing_times.push(time_str);
             missing_prev_closes.push(last_close_price);
             missing_open_interests.push(last_open_interest);
         }
+        // 其他情况（auction bar等不在complete_timeline中的时间）：不处理
     }
 
     // 保存长度（在move之前）
