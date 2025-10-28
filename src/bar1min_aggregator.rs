@@ -88,8 +88,18 @@ impl Bar1MinAggregator {
             return auction_bar;
         }
 
-        // 正常连续交易逻辑（未修改）
-        let tick_minute = floor_to_1min(&tick_time);
+        // 正常连续交易逻辑（符合左闭右开+收盘tick特殊处理）
+        let mut tick_minute = floor_to_1min(&tick_time);
+
+        // 检查是否是收盘时刻（与on_batch逻辑一致）
+        // 收盘tick应合并到前一分钟窗口，不生成独立bar
+        let is_closing_tick = Self::is_closing_time(tick, &tick_naive);
+        if is_closing_tick {
+            // 收盘tick特殊处理：分配到前一分钟窗口
+            // 例如：23:00:00 → 视为22:59窗口的tick
+            // 这样23:00 bar会包含完整的收盘数据，不会生成23:01 bar
+            tick_minute = tick_minute - chrono::Duration::minutes(1);
+        }
 
         if let Some(current_bar_minute) = self.current_bar_minute {
             if tick_minute == current_bar_minute {
@@ -289,10 +299,23 @@ impl Bar1MinAggregator {
         let comd = to_string_field(&last_tick.comd);
         let exchange = to_string_field(&last_tick.exchange);
         let date = to_string_field(&last_tick.date);
-        // 直接解析last_tick的时间（不使用cached_tick_time，避免窗口切换时的缓存不一致问题）
-        let parsed_time = Self::parse_datetime_from_tick(&last_tick)?;
-        let trade_time = align_to_bar_minute(&parsed_time)
-            .format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // 修复：优先使用current_bar_minute计算trade_time
+        // 这样可以正确处理收盘tick（23:00:00合并到22:59窗口）的情况
+        // 符合左闭右开+收盘特殊处理+标注结束时间的行业标准
+        let trade_time = if let Some(minute) = self.current_bar_minute {
+            // 使用current_bar_minute + 1min作为bar时间（标注结束时间）
+            // 例如：22:59窗口（包含23:00:00收盘tick）→ 23:00:00 bar
+            align_to_bar_minute(&minute)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        } else {
+            // 降级方案：第一个bar可能没有current_bar_minute，使用last_tick时间
+            let parsed_time = Self::parse_datetime_from_tick(&last_tick)?;
+            align_to_bar_minute(&parsed_time)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        };
 
         // 根据是否有上一个bar，分别处理volume/turnover/oi_diff计算
         let (volume, turnover, oi_diff, prev_close) = if let Some(prev) = self.prev_last_tick {
@@ -543,6 +566,36 @@ impl Bar1MinAggregator {
         }
 
         None
+    }
+
+    /// 检查是否是收盘时刻（与on_batch逻辑一致）
+    ///
+    /// 收盘tick应该合并到前一分钟窗口，遵循左闭右开+收盘特殊处理规则
+    /// 例如：23:00:00是收盘时刻，应累积到22:59窗口，生成23:00 bar
+    ///
+    /// # Arguments
+    /// * `tick` - 待检查的tick数据
+    /// * `tick_datetime` - tick的解析时间（NaiveDateTime）
+    ///
+    /// # Returns
+    /// * `true` - 如果tick时间精确等于任一交易时段的收盘时刻
+    /// * `false` - 否则
+    #[inline]
+    fn is_closing_time(tick: &TickData, tick_datetime: &NaiveDateTime) -> bool {
+        let comd = to_string_field(&tick.comd);
+        let tick_time = tick_datetime.time();
+
+        // 获取该品种的交易时段配置（支持多时段，如夜盘+日盘）
+        let trading_ranges = TRADE_SESSION_MAP.get_trading_ranges(&comd);
+
+        // 检查tick时间是否精确匹配任一时段的收盘时刻
+        for (_start, end) in trading_ranges {
+            if tick_time == end {
+                return true;
+            }
+        }
+
+        false
     }
 
 }
