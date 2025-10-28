@@ -2,9 +2,14 @@
 // 支持单合约处理和多线程并行批量处理
 //
 // 集合竞价处理说明:
-//   - 已修复第一个bar的open_interest_diff计算（现为0而不是OI本身）
-//   - ✅ 支持集合竞价tick过滤（2025-10-27修复）
-//   - 集合竞价tick会被正常聚合到对应的分钟bar中
+//   - 集合竞价tick通过时段过滤后，按自然分钟窗口聚合生成集合竞价bar
+//   - 依赖数据特性：集合竞价tick通常只在最后一分钟（09:29/20:59/08:59）
+//   - 如需严格的集合竞价处理（支持多分钟tick场景），请使用 parquet_processor_on_tick
+//
+// 时间窗口逻辑（与on_tick保持一致）:
+//   - floor_to_1min: 09:31:05 → 09:31:00（窗口划分）
+//   - align_to_bar_minute: 09:31:00 → 09:32:00（输出时间戳）
+//   - 示例：集合竞价tick 09:29:30 → 窗口09:29:00 → Bar 09:30:00
 
 use std::path::Path;
 
@@ -17,91 +22,6 @@ use std::sync::Arc;
 
 use md_processor::trade_session_loader::TRADE_SESSION_MAP;
 use md_processor::common_utils::{calculate_maturity_month, calculate_maturity_day, fill_missing_minutes, extract_contract_yymm, parse_anyvalue_datetime};
-
-/// 为集合竞价时段生成独立的bar
-/// 返回 (auction_bars_df, non_auction_df)
-fn extract_and_build_auction_bars(df: DataFrame) -> anyhow::Result<(Option<DataFrame>, DataFrame)> {
-    if df.height() == 0 {
-        return Ok((None, df));
-    }
-
-    // 获取品种代码
-    let current_comd = match df.column("comd")?.get(0)? {
-        AnyValue::String(v) => v.to_string(),
-        _ => return Ok((None, df)),  // 无法获取品种代码，跳过集合竞价处理
-    };
-
-    // 获取该品种的集合竞价时段配置
-    let auction_periods = (*TRADE_SESSION_MAP).get_auction_periods(&current_comd);
-
-    if auction_periods.is_empty() {
-        return Ok((None, df));  // 无集合竞价配置，跳过
-    }
-
-    // 识别集合竞价tick和非集合竞价tick
-    let mut auction_indices = Vec::new();
-    let mut non_auction_indices = Vec::new();
-    let trade_time_col = df.column("trade_time")?;
-
-    for i in 0..df.height() {
-        if let Ok(any_val) = trade_time_col.get(i) {
-            let tick_time = match any_val {
-                AnyValue::String(v) => {
-                    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f")
-                        .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S")) {
-                        naive_dt.time()
-                    } else {
-                        non_auction_indices.push(i as u32);
-                        continue;
-                    }
-                },
-                AnyValue::Datetime(v, _, _) => {
-                    let dt = parse_anyvalue_datetime(v);
-                    dt.time()
-                },
-                _ => {
-                    non_auction_indices.push(i as u32);
-                    continue;
-                },
-            };
-
-            // 检查是否在集合竞价时段
-            let is_auction = auction_periods.iter().any(|(start, end)| {
-                tick_time >= *start && tick_time < *end
-            });
-
-            if is_auction {
-                auction_indices.push(i as u32);
-            } else {
-                non_auction_indices.push(i as u32);
-            }
-        } else {
-            non_auction_indices.push(i as u32);
-        }
-    }
-
-    // 分离集合竞价和非集合竞价数据
-    let non_auction_df = if !non_auction_indices.is_empty() {
-        let indices_ca = UInt32Chunked::from_vec("", non_auction_indices);
-        df.take(&indices_ca)?
-    } else {
-        df.clone().clear()
-    };
-
-    if auction_indices.is_empty() {
-        return Ok((None, non_auction_df));  // 无集合竞价tick
-    }
-
-    // 暂时不实现集合竞价bar生成（batch处理器的向量化实现较复杂）
-    // on_tick处理器已完整支持集合竞价，如需精确处理请使用on_tick
-    // let _auction_df = {
-    //     let indices_ca = UInt32Chunked::from_vec("", auction_indices);
-    //     df.take(&indices_ca)?
-    // };
-
-    // TODO: 实现集合竞价bar生成逻辑
-    Ok((None, non_auction_df))
-}
 
 /// 从 parquet 文件加载并过滤数据
 fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<DataFrame> {
