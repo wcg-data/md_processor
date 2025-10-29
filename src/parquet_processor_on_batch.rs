@@ -948,9 +948,16 @@ fn process_batch_simple(data_source_name: &str, mode: &str, num_threads: usize) 
                 if mode_clone.as_str() == "5min" && contract.ends_with("_1min") {
                     contract = contract.strip_suffix("_1min").unwrap_or(&contract).to_string();
                 }
-                
+
+                // 跳过特殊测试合约（88、99等后缀）
+                // 例如：Y88, I88A2, Y99, etc.
+                if contract.contains("88") || contract.contains("99") {
+                    println!("⊘ 线程{}: {} - 跳过测试合约", thread_id, contract);
+                    continue;
+                }
+
                 let output_path = format!("{}/{}{}.parquet", output_dir_clone, contract, output_suffix_clone);
-                
+
                 // 跳过已存在文件
                 if std::path::Path::new(&output_path).exists() {
                     continue;
@@ -1019,6 +1026,12 @@ fn main() -> anyhow::Result<()> {
             process_batch_simple(data_source, mode, threads)?;
         } else {
             // 单合约处理
+            // 跳过特殊测试合约
+            if third.contains("88") || third.contains("99") {
+                println!("⊘ {} - 跳过测试合约", third);
+                return Ok(());
+            }
+
             println!("单合约: {} {} {}", data_source, mode, third);
             let data_path = format!("{}/{}", DATA_ROOT, data_source);
             let (input_dir, output_dir, input_suffix, output_suffix) =
