@@ -82,7 +82,15 @@ impl Bar1MinAggregator {
             self.auction_opening_time = None;
 
             // 处理当前tick（连续交易的第一个tick）
-            let tick_minute = floor_to_1min(&tick_time);
+            let mut tick_minute = floor_to_1min(&tick_time);
+
+            // 【修复】检查是否是收盘时刻（与on_batch逻辑一致）
+            // 即使是离开集合竞价的第一个tick，如果它是收盘时刻，也要特殊处理
+            let is_closing_tick = Self::is_closing_time(tick, &tick_naive);
+            if is_closing_tick {
+                tick_minute = tick_minute - chrono::Duration::minutes(1);
+            }
+
             self.init_bar_window(tick, tick_minute);
 
             return auction_bar;
