@@ -302,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "1min" => {
             // tick -> 1min (使用在线处理逻辑)
             let input_path = format!("{}/full_tick/{}.parquet", data_source, contract);
-            let output_path = format!("{}/full_bar_1min/{}_1min_on_tick.parquet", data_source, contract);
+            let output_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_source, contract);
 
             println!("处理模式: tick -> 1min (使用在线处理代码)");
             println!("输入文件: {}", input_path);
@@ -315,8 +315,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "5min" => {
             // 1min -> 5min (使用 Bar5MinAggregator)
-            let input_path = format!("{}/full_bar_1min/{}_1min_on_tick.parquet", data_source, contract);
-            let output_path = format!("{}/full_bar_5min/{}_5min_on_tick.parquet", data_source, contract);
+            let input_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_source, contract);
+            let output_path = format!("{}/full_bar_5min_on_tick/{}_5min.parquet", data_source, contract);
 
             println!("处理模式: 1min -> 5min (使用 Bar5MinAggregator)");
             println!("输入文件: {}", input_path);
