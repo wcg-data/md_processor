@@ -2,6 +2,8 @@
 
 use std::path::Path;
 use std::fs::File;
+use std::sync::Arc;
+use std::thread;
 use anyhow;
 use polars::prelude::*;
 use chrono::{NaiveDateTime, NaiveDate, Datelike};
@@ -279,58 +281,226 @@ pub fn process_1min_to_5min<P: AsRef<Path>>(parquet_1min_path: P, output_5min_pa
     Ok(())
 }
 
-/// 主函数：使用在线处理代码的离线tick/bar处理器
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+// =================================批量处理====================================
+/// 发现parquet文件
+fn find_parquet_files(dir: &str) -> anyhow::Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
+            if let Some(path_str) = path.to_str() {
+                files.push(path_str.to_string());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
 
-    if args.len() < 4 {
-        println!("使用方法: {} <source_name> <freq> <contract>", args[0]);
-        println!("说明: 使用在线处理代码的离线处理器");
-        println!("示例 tick->1min: {} dongzheng_data 1min bb1710", args[0]);
-        println!("示例 1min->5min: {} dongzheng_data 5min bb1710", args[0]);
+/// 提取合约名
+fn extract_contract_name(file_path: &str) -> Option<String> {
+    std::path::Path::new(file_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|s| s.to_string())
+}
+
+/// 批量并行处理，支持tick->1min和1min->5min两种模式
+fn process_batch_simple(data_source_name: &str, mode: &str, num_threads: usize) -> anyhow::Result<()> {
+    let data_root = "/data/future_data";
+    let data_source = format!("{}/{}", data_root, data_source_name);
+
+    let (input_dir, output_dir, input_suffix, output_suffix) = match mode {
+        "1min" => {
+            // tick -> 1min
+            (
+                format!("{}/full_tick", data_source),
+                format!("{}/full_bar_1min_on_tick", data_source),
+                "",
+                "_1min"
+            )
+        },
+        "5min" => {
+            // 1min -> 5min
+            (
+                format!("{}/full_bar_1min_on_tick", data_source),
+                format!("{}/full_bar_5min_on_tick", data_source),
+                "_1min",
+                "_5min"
+            )
+        },
+        _ => return Err(anyhow::anyhow!("不支持的模式: {}", mode)),
+    };
+
+    println!("扫描目录: {}", input_dir);
+    let files = find_parquet_files(&input_dir)?;
+
+    if files.is_empty() {
+        println!("未发现文件");
         return Ok(());
     }
 
-    let source_name = &args[1];
-    let freq = &args[2];
-    let contract = &args[3];
+    println!("发现 {} 个文件，使用 {} 个线程", files.len(), num_threads);
+    std::fs::create_dir_all(&output_dir)?;
 
-    let data_dir = "/data/future_data";
-    let data_source = format!("{}/{}", data_dir, source_name);
+    // 分割文件给不同线程
+    let chunk_size = (files.len() + num_threads - 1) / num_threads;
+    let files_arc = Arc::new(files);
+    let output_dir_arc = Arc::new(output_dir);
+    let mode_arc = Arc::new(mode.to_string());
+    let input_suffix_arc = Arc::new(input_suffix.to_string());
+    let output_suffix_arc = Arc::new(output_suffix.to_string());
 
-    match freq.as_str() {
-        "1min" => {
-            // tick -> 1min (使用在线处理逻辑)
-            let input_path = format!("{}/full_tick/{}.parquet", data_source, contract);
-            let output_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_source, contract);
+    let mut handles = Vec::new();
 
-            println!("处理模式: tick -> 1min (使用在线处理代码)");
-            println!("输入文件: {}", input_path);
-            println!("输出文件: {}", output_path);
+    for thread_id in 0..num_threads {
+        let files_clone = Arc::clone(&files_arc);
+        let output_dir_clone = Arc::clone(&output_dir_arc);
+        let mode_clone = Arc::clone(&mode_arc);
+        let input_suffix_clone = Arc::clone(&input_suffix_arc);
+        let output_suffix_clone = Arc::clone(&output_suffix_arc);
 
-            match process_parquet_on_tick(&input_path, &output_path) {
-                Ok(()) => println!("✓ 成功生成1分钟bar: {}", output_path),
-                Err(e) => println!("✗ 处理失败: {}", e),
+        let handle = thread::spawn(move || {
+            let start = thread_id * chunk_size;
+            let end = ((thread_id + 1) * chunk_size).min(files_clone.len());
+
+            for i in start..end {
+                let file_path = &files_clone[i];
+
+                let mut contract = match extract_contract_name(file_path) {
+                    Some(name) => name,
+                    None => continue,
+                };
+
+                // 对于1min->5min模式，需要去掉文件名中的_1min后缀
+                if mode_clone.as_str() == "5min" && contract.ends_with("_1min") {
+                    contract = contract.strip_suffix("_1min").unwrap_or(&contract).to_string();
+                }
+
+                // 跳过特殊测试合约（88、99等后缀）
+                if contract.contains("88") || contract.contains("99") {
+                    println!("⊘ 线程{}: {} - 跳过测试合约", thread_id, contract);
+                    continue;
+                }
+
+                let output_path = format!("{}/{}{}.parquet", output_dir_clone, contract, output_suffix_clone);
+
+                // 跳过已存在文件
+                if std::path::Path::new(&output_path).exists() {
+                    continue;
+                }
+
+                let result = match mode_clone.as_str() {
+                    "1min" => process_parquet_on_tick(file_path, &output_path),
+                    "5min" => process_1min_to_5min(file_path, &output_path),
+                    _ => Err(anyhow::anyhow!("不支持的模式")),
+                };
+
+                match result {
+                    Ok(()) => println!("✓ 线程{}: {}", thread_id, contract),
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        if error_msg.contains("PAR1") || error_msg.contains("File out of specification") {
+                            eprintln!("⚠ 线程{}: {} - 文件损坏，跳过", thread_id, contract);
+                        } else if error_msg.contains("文件太小") {
+                            eprintln!("⚠ 线程{}: {} - 文件太小，跳过", thread_id, contract);
+                        } else {
+                            eprintln!("✗ 线程{}: {} - {}", thread_id, contract, e);
+                        }
+                    },
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // 等待所有线程完成
+    for handle in handles {
+        handle.join().map_err(|_| anyhow::anyhow!("线程执行失败"))?;
+    }
+
+    println!("所有线程处理完成");
+    Ok(())
+}
+
+/// 主函数：支持批量并行和单合约处理
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() < 2 {
+        println!("用法: {} <data_source> [mode] [threads|contract]", args[0]);
+        println!("示例:");
+        println!("  {} dongzheng_data 1min      # 批量处理，4线程", args[0]);
+        println!("  {} dongzheng_data 1min 230  # 批量处理，230线程", args[0]);
+        println!("  {} dongzheng_data 1min bb1710  # 单合约", args[0]);
+        return Ok(());
+    }
+
+    let data_source = args.get(1).map(|s| s.as_str()).unwrap_or("dongzheng_data");
+    let mode = args.get(2).map(|s| s.as_str()).unwrap_or("1min");
+
+    if mode != "1min" && mode != "5min" {
+        eprintln!("错误: mode必须是1min或5min");
+        return Ok(());
+    }
+
+    // 第3个参数：数字=线程数（批量），字符串=合约名（单个）
+    if let Some(third) = args.get(3) {
+        if let Ok(threads) = third.parse::<usize>() {
+            // 批量处理
+            println!("批量处理: {} {} ({}线程)", data_source, mode, threads);
+            process_batch_simple(data_source, mode, threads)?;
+        } else {
+            // 单合约处理
+            // 跳过特殊测试合约
+            if third.contains("88") || third.contains("99") {
+                println!("⊘ {} - 跳过测试合约", third);
+                return Ok(());
+            }
+
+            println!("单合约: {} {} {}", data_source, mode, third);
+            let data_path = format!("/data/future_data/{}", data_source);
+
+            match mode {
+                "1min" => {
+                    // tick -> 1min
+                    let input_path = format!("{}/full_tick/{}.parquet", data_path, third);
+                    let output_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_path, third);
+
+                    println!("处理模式: tick -> 1min (使用在线处理代码)");
+                    println!("输入文件: {}", input_path);
+                    println!("输出文件: {}", output_path);
+
+                    match process_parquet_on_tick(&input_path, &output_path) {
+                        Ok(()) => println!("✓ 成功生成1分钟bar: {}", output_path),
+                        Err(e) => println!("✗ 处理失败: {}", e),
+                    }
+                }
+                "5min" => {
+                    // 1min -> 5min
+                    let input_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_path, third);
+                    let output_path = format!("{}/full_bar_5min_on_tick/{}_5min.parquet", data_path, third);
+
+                    println!("处理模式: 1min -> 5min (使用 Bar5MinAggregator)");
+                    println!("输入文件: {}", input_path);
+                    println!("输出文件: {}", output_path);
+
+                    match process_1min_to_5min(&input_path, &output_path) {
+                        Ok(()) => println!("✓ 成功生成5分钟bar: {}", output_path),
+                        Err(e) => println!("✗ 处理失败: {}", e),
+                    }
+                }
+                _ => {
+                    println!("错误: freq 必须是 '1min' 或 '5min'");
+                }
             }
         }
-        "5min" => {
-            // 1min -> 5min (使用 Bar5MinAggregator)
-            let input_path = format!("{}/full_bar_1min_on_tick/{}_1min.parquet", data_source, contract);
-            let output_path = format!("{}/full_bar_5min_on_tick/{}_5min.parquet", data_source, contract);
-
-            println!("处理模式: 1min -> 5min (使用 Bar5MinAggregator)");
-            println!("输入文件: {}", input_path);
-            println!("输出文件: {}", output_path);
-
-            match process_1min_to_5min(&input_path, &output_path) {
-                Ok(()) => println!("✓ 成功生成5分钟bar: {}", output_path),
-                Err(e) => println!("✗ 处理失败: {}", e),
-            }
-        }
-        _ => {
-            println!("错误: freq 必须是 '1min' 或 '5min'");
-            return Ok(());
-        }
+    } else {
+        // 默认批量处理，4线程
+        println!("批量处理: {} {} (4线程)", data_source, mode);
+        process_batch_simple(data_source, mode, 4)?;
     }
 
     Ok(())
