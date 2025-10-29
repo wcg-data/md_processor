@@ -59,7 +59,32 @@ impl Bar1MinAggregator {
 
                 return prev_bar;  // 返回前一个连续交易bar（如果有）
             } else {
-                // 已经在集合竞价时段内，继续累积
+                // 已经在集合竞价时段内
+                // 【修复问题17补充】检查是否跨天：如果跨天，必须先flush前一天的集合竞价bar
+                // 场景：连续多天都只有集合竞价tick（如bb2501的2025-01-02到2025-01-10）
+                // 如果不flush，多天的auction_ticks会混在一起，导致使用最后一天的数据
+                if !self.auction_ticks.is_empty() {
+                    let last_auction_date = to_string_field(&self.auction_ticks.last().unwrap().date);
+                    let curr_date = to_string_field(&tick.date);
+
+                    if last_auction_date != curr_date {
+                        // 跨天：flush前一天的集合竞价bar
+                        let prev_auction_bar = self.flush_auction_bar();
+
+                        // 重置集合竞价状态，开始新的一天
+                        self.in_auction_period = false;
+                        self.auction_opening_time = None;
+
+                        // 当前tick是新一天的集合竞价tick，重新进入集合竞价时段
+                        self.auction_ticks.push(*tick);
+                        self.in_auction_period = true;
+                        self.auction_opening_time = Some(opening_time);
+
+                        return prev_auction_bar;
+                    }
+                }
+
+                // 同一天，继续累积
                 self.auction_ticks.push(*tick);
                 return None;
             }
@@ -238,6 +263,14 @@ impl Bar1MinAggregator {
     }
 
     pub fn flush(&mut self) -> Option<BarData> {
+        // 【修复问题17】优先flush集合竞价缓冲区
+        // 场景：程序结束时，如果只有集合竞价tick而无连续交易tick
+        // 例如：bb2501 2025-01-02只有08:59:00集合竞价tick和15:02:43收盘后tick
+        // 此时auction_ticks有数据但从未触发flush_auction_bar()，需要在这里flush
+        if !self.auction_ticks.is_empty() && self.in_auction_period {
+            return self.flush_auction_bar();
+        }
+
         if self.last_tick.is_none() {
             // 当前分钟没有任何 tick，到达时间后补空 bar（根据 prev_last_tick 构造）
             if let Some(prev_last_tick) = self.prev_last_tick {
