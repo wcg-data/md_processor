@@ -94,6 +94,35 @@ def get_auction_time(exchange: str, time_begin: str) -> Optional[str]:
     return None
 
 
+def normalize_product_case(product: str, exchange: str) -> str:
+    """
+    根据交易所规则标准化品种代码的大小写
+
+    规则：
+    - CZCE（郑州商品交易所）+ CFFEX（中国金融期货交易所）= 大写
+    - SHFE（上海期货交易所）+ DCE（大连商品交易所）+ INE（上海国际能源）+ GFEX（广州期货）= 小写
+
+    Args:
+        product: 原始品种代码
+        exchange: 交易所代码
+
+    Returns:
+        标准化后的品种代码
+    """
+    # 大写交易所
+    UPPERCASE_EXCHANGES = {'CZCE', 'CFFEX'}
+    # 小写交易所
+    LOWERCASE_EXCHANGES = {'SHFE', 'DCE', 'INE', 'GFEX'}
+
+    if exchange in UPPERCASE_EXCHANGES:
+        return product.upper()
+    elif exchange in LOWERCASE_EXCHANGES:
+        return product.lower()
+    else:
+        # 未知交易所，保持原样
+        return product
+
+
 def organize_sessions_by_product(sessions: List[Dict]) -> Dict[str, List[Tuple]]:
     """
     按品种组织交易时段数据
@@ -108,10 +137,13 @@ def organize_sessions_by_product(sessions: List[Dict]) -> Dict[str, List[Tuple]]
 
     for session in sessions:
         exchange = session['ExchangeID']
-        product = session['ProductID']
+        product_raw = session['ProductID']
         segment_no = session['SegmentNo']
         time_begin = session['TimeBegin']
         time_end = session['TimeEnd']
+
+        # 根据交易所规则标准化品种代码大小写
+        product = normalize_product_case(product_raw, exchange)
 
         # 获取集合竞价时间（只有第一个时段才可能有集合竞价）
         auction_time = get_auction_time(exchange, time_begin) if segment_no == 1 else None
