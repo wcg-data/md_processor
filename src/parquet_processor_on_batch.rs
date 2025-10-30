@@ -115,6 +115,11 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
     
     // println!("基础过滤后数据行数: {}", result_df.height());
 
+    // 检查基础过滤后是否有数据
+    if result_df.height() == 0 {
+        return Err(anyhow::anyhow!("所有tick被过滤，没有有效数据"));
+    }
+
     // 交易时间过滤（优化后的逐行过滤）
     // 先获取当前品种代码（假设整个文件都是同一品种）
     let current_comd = match result_df.column("comd")?.get(0)? {
@@ -557,6 +562,11 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
     // 1. 读取和过滤数据
     let df = read_tick_from_parquet(&parquet_path)?;
 
+    // 1.5. 检查过滤后是否有数据
+    if df.height() == 0 {
+        return Err(anyhow::anyhow!("所有tick被过滤，没有有效数据"));
+    }
+
     // 2. 清理bid/ask为0或NaN的情况：将价格设为NaN，volume设为0（Parquet会存储为NULL）
     // 与on_tick的validate_tick保持一致
     let df = df.lazy()
@@ -977,6 +987,8 @@ fn process_batch_simple(data_source_name: &str, mode: &str, num_threads: usize) 
                             eprintln!("⚠ 线程{}: {} - 文件损坏，跳过", thread_id, contract);
                         } else if error_msg.contains("文件太小") {
                             eprintln!("⚠ 线程{}: {} - 文件太小，跳过", thread_id, contract);
+                        } else if error_msg.contains("所有tick被过滤") {
+                            eprintln!("⊘ 线程{}: {} - 无有效tick数据，跳过", thread_id, contract);
                         } else {
                             eprintln!("✗ 线程{}: {} - {}", thread_id, contract, e);
                         }
