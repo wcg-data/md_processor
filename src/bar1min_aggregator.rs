@@ -60,6 +60,28 @@ impl Bar1MinAggregator {
                 return prev_bar;  // 返回前一个连续交易bar（如果有）
             } else {
                 // 已经在集合竞价时段内
+                // 【修复问题23】优先检查是否跨集合竞价时段
+                // 场景：同一交易日有多个集合竞价时段（如au的09:00和21:00）
+                // date字段相同（都是交易日），但开盘时间不同
+                // 如果不检查，会将不同时段的auction_ticks混在一起，导致生成错误的bar
+                if let Some(prev_opening_time) = self.auction_opening_time {
+                    if opening_time != prev_opening_time {
+                        // 跨集合竞价时段：flush前一个集合竞价bar
+                        let prev_auction_bar = self.flush_auction_bar();
+
+                        // 重置集合竞价状态，开始新的集合竞价时段
+                        self.in_auction_period = false;
+                        self.auction_opening_time = None;
+
+                        // 当前tick是新集合竞价时段的tick，重新进入集合竞价时段
+                        self.auction_ticks.push(*tick);
+                        self.in_auction_period = true;
+                        self.auction_opening_time = Some(opening_time);
+
+                        return prev_auction_bar;
+                    }
+                }
+
                 // 【修复问题17补充】检查是否跨天：如果跨天，必须先flush前一天的集合竞价bar
                 // 场景：连续多天都只有集合竞价tick（如bb2501的2025-01-02到2025-01-10）
                 // 如果不flush，多天的auction_ticks会混在一起，导致使用最后一天的数据
@@ -84,7 +106,7 @@ impl Bar1MinAggregator {
                     }
                 }
 
-                // 同一天，继续累积
+                // 同一天同一时段，继续累积
                 self.auction_ticks.push(*tick);
                 return None;
             }
