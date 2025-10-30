@@ -263,6 +263,16 @@ impl Bar1MinAggregator {
     }
 
     pub fn flush(&mut self) -> Option<BarData> {
+        // 【修复问题21】文件结束时，如果没有实际数据，清空集合竞价状态
+        // 场景：最后交易日已停夜盘，文件结束时last_tick和auction_ticks都为空
+        // 但in_auction_period可能还是true，auction_opening_time残留旧值
+        // 此时应该清空状态，避免生成错误的空bar
+        if self.last_tick.is_none() && self.auction_ticks.is_empty() {
+            self.in_auction_period = false;
+            self.auction_opening_time = None;
+            return None;
+        }
+
         // 【修复问题17】优先flush集合竞价缓冲区
         // 场景：程序结束时，如果只有集合竞价tick而无连续交易tick
         // 例如：bb2501 2025-01-02只有08:59:00集合竞价tick和15:02:43收盘后tick
