@@ -181,6 +181,30 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
         println!("警告: 未找到品种 {} 的交易时间配置，跳过交易时间过滤", current_comd);
     }
 
+    // 【与validate_tick保持一致】清理bid/ask=0的情况，并重新计算mid_price
+    // 当bid或ask为0或NaN时，将其设为NaN；然后重新计算mid_price
+    result_df = result_df.lazy()
+        .with_columns([
+            // 清理bid_price_1: 0或NaN → NaN
+            when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
+                .then(lit(f64::NAN))
+                .otherwise(col("bid_price_1"))
+                .alias("bid_price_1"),
+            // 清理ask_price_1: 0或NaN → NaN
+            when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
+                .then(lit(f64::NAN))
+                .otherwise(col("ask_price_1"))
+                .alias("ask_price_1"),
+        ])
+        .with_columns([
+            // 重新计算mid_price: 只有当bid和ask都不是NaN时才计算，否则设为NaN
+            when(col("bid_price_1").is_nan().or(col("ask_price_1").is_nan()))
+                .then(lit(f64::NAN))
+                .otherwise((col("bid_price_1") + col("ask_price_1")) / lit(2.0))
+                .alias("mid_price"),
+        ])
+        .collect()?;
+
     Ok(result_df)
 }
 
