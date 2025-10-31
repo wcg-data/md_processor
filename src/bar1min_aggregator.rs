@@ -246,6 +246,16 @@ impl Bar1MinAggregator {
             0
         };
 
+        // 修复：集合竞价bar也应该有prev_close（前一个bar的close值）
+        let prev_close = if let Some(prev) = &self.prev_last_tick {
+            prev.close
+        } else {
+            f64::NAN  // 第一个bar
+        };
+
+        // 计算 log_return
+        let log_return = (close_price / prev_close).ln();
+
         let bar = BarData {
             contract: contract.clone(),
             contract_yymm: extract_contract_yymm(&contract, &date),
@@ -257,7 +267,7 @@ impl Bar1MinAggregator {
             high: high_price,
             low: low_price,
             close: close_price,
-            prev_close: f64::NAN,  // 集合竞价bar无prev_close
+            prev_close,  // 修复：使用前一个bar的close值
             pre_settle: last_tick.pre_settle,
             volume,
             turnover,
@@ -269,7 +279,7 @@ impl Bar1MinAggregator {
             ask_volume_1: last_tick.ask_volume_1,
             mid_price: last_tick.mid_price,
             vwap: if volume == 0 { 0.0 } else { turnover / volume as f64 },
-            log_return: f64::NAN,  // 集合竞价bar无法计算log_return
+            log_return,  // 修复：正确计算log_return
             maturity_month: 0,
             maturity_day: 0,
         };

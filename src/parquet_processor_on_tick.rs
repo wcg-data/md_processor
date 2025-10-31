@@ -28,7 +28,7 @@ fn build_bars_dataframe(bars: &[BarData]) -> PolarsResult<DataFrame> {
         Series::new("low", bars.iter().map(|b| b.low).collect::<Vec<_>>()),
         Series::new("close", bars.iter().map(|b| b.close).collect::<Vec<_>>()),
         Series::new("prev_close", bars.iter().map(|b| if b.prev_close.is_nan() { None } else { Some(b.prev_close) }).collect::<Vec<_>>()),
-        Series::new("pre_settle", bars.iter().map(|b| b.pre_settle).collect::<Vec<_>>()),
+        Series::new("pre_settle", bars.iter().map(|b| if b.pre_settle.is_nan() { None } else { Some(b.pre_settle) }).collect::<Vec<_>>()),
 
         Series::new("volume", bars.iter().map(|b| b.volume as u32).collect::<Vec<_>>()),
         Series::new("turnover", bars.iter().map(|b| b.turnover).collect::<Vec<_>>()),
@@ -83,6 +83,7 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
         };
         let get_f64 = |idx| match row.0[idx] {
             AnyValue::Float64(v) => v,
+            AnyValue::Null => f64::NAN,  // 修复：null转为NaN，而不是0.0
             _ => 0.0,
         };
         let get_u32 = |idx| match row.0[idx] {
@@ -176,7 +177,17 @@ pub fn process_parquet_on_tick<P: AsRef<Path>>(parquet_path: P, output_parquet_p
             df_out
         }
     };
-    
+
+    // 修复：将补全bar中的pre_settle NaN转换为null（与on_batch保持一致）
+    df_out = df_out.lazy()
+        .with_column(
+            when(col("pre_settle").is_nan())
+                .then(lit(NULL))
+                .otherwise(col("pre_settle"))
+                .alias("pre_settle")
+        )
+        .collect()?;
+
     // 写入 parquet
     let file = File::create(output_parquet_path)?;
     ParquetWriter::new(file).finish(&mut df_out)?;

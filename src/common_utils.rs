@@ -361,6 +361,17 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
                     // 延续价格情况下，log_return为0
                     Series::new("log_return", vec![0.0f64; count])
                 },
+                "pre_settle" => {
+                    // 修复：pre_settle在补全bar中应该保持null
+                    // 需要根据模板列的类型来创建Series
+                    let template_col = template_row.column("pre_settle")?;
+                    let col_dtype = template_col.dtype();
+                    match col_dtype {
+                        DataType::Float64 => Series::new("pre_settle", vec![f64::NAN; count]),
+                        DataType::Null => Series::new_null("pre_settle", count),
+                        _ => Series::new("pre_settle", vec![f64::NAN; count]),
+                    }
+                },
                 "prev_close" => {
                     // 使用延续价格
                     Series::new("prev_close", missing_prev_closes_ref.clone())
