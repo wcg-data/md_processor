@@ -77,12 +77,14 @@ fn write_bar_to_csv(bar: &BarData, freq: &str) {
         bar.high,
         bar.low,
         bar.close,
-        bar.prev_close,
-        bar.pre_settle,
+        // 修复：NaN → 空字符串（与Parquet的NULL语义对应）
+        if bar.prev_close.is_nan() { String::new() } else { bar.prev_close.to_string() },
+        if bar.pre_settle.is_nan() { String::new() } else { bar.pre_settle.to_string() },
         bar.volume,
         bar.turnover,
         bar.open_interest,
         bar.open_interest_diff,
+        // bid/ask清理规则：0.0 → 空字符串
         if bar.bid_price_1 == 0.0 { String::new() } else { bar.bid_price_1.to_string() },
         if bar.bid_volume_1 == 0 { String::new() } else { bar.bid_volume_1.to_string() },
         if bar.ask_price_1 == 0.0 { String::new() } else { bar.ask_price_1.to_string() },
