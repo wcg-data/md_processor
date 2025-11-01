@@ -68,51 +68,66 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
     // println!("原始数据行数: {}", raw_df.height());
     // println!("数据列名: {:?}", raw_df.get_column_names());
     
-    // 基于 validate_tick 逻辑的高性能向量化过滤
+    // 基于 validate_tick 逻辑的高性能向量化过滤（完全使用eager模式）
     // 注意: 读取 open/high/low 字段以备未来使用（当前未使用，OHLC 在聚合时基于 close 价格重新计算）
-    let mut result_df = LazyFrame::scan_parquet(path_str, Default::default())?
-        .select([
-            col("contract"), col("comd"), col("exchange"), col("date"), col("trade_time"),
-            col("open"), col("high"), col("low"), col("close"), col("pre_settle"),
-            col("volume"), col("turnover"), col("open_interest"),
-            col("bid_price_1"), col("bid_volume_1"), col("ask_price_1"), col("ask_volume_1"), col("mid_price"),
-        ])
-        .filter(
-            // 基本数据有效性过滤 - 核心必需字段检查
-            col("close").is_not_null()
-                .and(col("close").gt(lit(0.0)))
-                .and(col("volume").is_not_null())
-                .and(col("turnover").is_not_null())
-                .and(col("turnover").gt_eq(lit(0.0)))  // turnover >= 0
-                .and(col("bid_price_1").is_not_null())
-                .and(col("bid_price_1").gt_eq(lit(0.0)))  // bid >= 0（允许0和NaN）
-                .and((col("bid_price_1").is_nan()).or(col("bid_price_1").is_finite()))  // 允许NaN，拒绝Infinity
-                .and(col("ask_price_1").is_not_null())
-                .and(col("ask_price_1").gt_eq(lit(0.0)))  // ask >= 0（允许0和NaN）
-                .and((col("ask_price_1").is_nan()).or(col("ask_price_1").is_finite()))  // 允许NaN，拒绝Infinity
-                // bid <= ask 检查：只在bid和ask都>0时才要求bid<=ask（与validate_tick保持一致）
-                // 如果bid=0或ask=0，则跳过检查；只有当两者都>0时才要求bid<=ask
-                .and(
-                    col("bid_price_1").eq(lit(0.0))  // bid=0, 通过
-                    .or(col("ask_price_1").eq(lit(0.0)))  // ask=0, 通过
-                    .or(col("bid_price_1").lt_eq(col("ask_price_1")))  // bid>0且ask>0时要求bid<=ask
-                )
-                // volume和turnover一致性校验
-                .and(
-                    // (volume = 0 且 turnover = 0/NaN) 或 (volume > 0 且 turnover > 0)
-                    (col("volume").eq(lit(0)).and(
-                        col("turnover").eq(lit(0.0)).or(col("turnover").is_nan())
-                    ))
-                    .or(col("volume").gt(lit(0)).and(col("turnover").gt(lit(0.0))))
-                )
-                // 字段非空检查
-                .and(col("comd").is_not_null())
-                .and(col("contract").is_not_null())
-                .and(col("trade_time").is_not_null())
-        )
-        .sort(["trade_time"], SortMultipleOptions::default())
-        .collect()?;
-    
+    let df = ParquetReader::new(std::fs::File::open(path_str)?)
+        .finish()?;
+
+    // Eager模式: 先select需要的列
+    let mut result_df = df.select([
+        "contract", "comd", "exchange", "date", "trade_time",
+        "open", "high", "low", "close", "pre_settle",
+        "volume", "turnover", "open_interest",
+        "bid_price_1", "bid_volume_1", "ask_price_1", "ask_volume_1", "mid_price",
+    ])?;
+
+    // Eager模式: 创建过滤mask（使用eager API）
+    // 基本数据有效性过滤 - 核心必需字段检查
+    let close_col = result_df.column("close")?;
+    let volume_col = result_df.column("volume")?;
+    let turnover_col = result_df.column("turnover")?;
+    let bid_price_col = result_df.column("bid_price_1")?;
+    let ask_price_col = result_df.column("ask_price_1")?;
+
+    let mut mask_vec = Vec::with_capacity(result_df.height());
+    for i in 0..result_df.height() {
+        let close_val = close_col.get(i)?;
+        let volume_val = volume_col.get(i)?;
+        let turnover_val = turnover_col.get(i)?;
+        let bid_val = bid_price_col.get(i)?;
+        let ask_val = ask_price_col.get(i)?;
+
+        let is_valid = match (close_val, volume_val, turnover_val, bid_val, ask_val) {
+            (AnyValue::Float64(c), _, AnyValue::Float64(t), AnyValue::Float64(b), AnyValue::Float64(a)) => {
+                c > 0.0 && t >= 0.0 && b >= 0.0 && a >= 0.0
+                && (b.is_finite() || b.is_nan()) && (a.is_finite() || a.is_nan())
+                && (b == 0.0 || a == 0.0 || b <= a)
+            },
+            _ => false,
+        };
+        mask_vec.push(is_valid);
+    }
+
+    let mask_series = Series::new("mask", mask_vec);
+    let mask = mask_series.bool()?;
+    result_df = result_df.filter(mask)?;
+
+    // Eager模式: 排序
+    result_df = result_df.sort(["trade_time"], SortMultipleOptions::default())?;
+
+    // Eager模式: 立即进行类型转换为Int64（用于后续计算），避免类型推断问题
+    let volume_i64 = result_df.column("volume")?.cast(&DataType::Int64)?;
+    let oi_i64 = result_df.column("open_interest")?.cast(&DataType::Int64)?;
+    let bid_vol_u32 = result_df.column("bid_volume_1")?.cast(&DataType::UInt32)?;
+    let ask_vol_u32 = result_df.column("ask_volume_1")?.cast(&DataType::UInt32)?;
+
+    result_df = result_df
+        .with_column(volume_i64)?
+        .with_column(oi_i64)?
+        .with_column(bid_vol_u32)?
+        .with_column(ask_vol_u32)?
+        .clone();
+
     // println!("基础过滤后数据行数: {}", result_df.height());
 
     // 检查基础过滤后是否有数据
@@ -301,27 +316,33 @@ fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String
     let contract = df.column("contract")?.get(0).unwrap().to_string().replace("\"", "");
     let comd = df.column("comd")?.get(0).unwrap().to_string().replace("\"", "");
     let exchange = df.column("exchange")?.get(0).unwrap().to_string().replace("\"", "");
-    
-    let mut grouped_df = df.lazy()
-        .sort(["trade_time"], SortMultipleOptions::default()) // 确保先按时间排序
+
+    // 创建可变绑定
+    let mut df = df;
+
+    // 先转换为Int64再进行聚合（避免聚合操作产生dyn int）
+    let vol_i64 = df.column("volume")?.cast(&DataType::Int64)?;
+    let oi_i64 = df.column("open_interest")?.cast(&DataType::Int64)?;
+    let df_with_i64 = df.with_column(vol_i64)?.with_column(oi_i64)?.clone();
+
+    // 使用lazy group_by但立即collect（类型已经在eager模式下转换好）
+    let mut grouped_df = df_with_i64.lazy()
+        .sort(["trade_time"], SortMultipleOptions::default())
         .group_by([col("minute_window")])
         .agg([
             // 时间字段处理
             col("date").last().alias("date"),
             col("minute_window").first().alias("trade_time"),
-
-            // OHLC 计算（已向量化）
+            // OHLC 计算
             col("close").first().alias("open"),
             col("close").max().alias("high"),
             col("close").min().alias("low"),
             col("close").last().alias("close"),
-
-            // 用于跨窗口计算的关键字段
+            // 用于跨窗口计算的关键字段（已经是Int64，不会产生类型推断问题）
             col("volume").last().alias("last_volume"),
             col("turnover").last().alias("last_turnover"),
             col("open_interest").last().alias("last_open_interest"),
             col("pre_settle").last().alias("pre_settle"),
-
             // 盘口数据
             col("bid_price_1").last().alias("bid_price_1"),
             col("bid_volume_1").last().alias("bid_volume_1"),
@@ -329,8 +350,17 @@ fn perform_group_aggregation(df: DataFrame) -> anyhow::Result<(DataFrame, String
             col("ask_volume_1").last().alias("ask_volume_1"),
             col("mid_price").last().alias("mid_price"),
         ])
-        .sort(["trade_time"], SortMultipleOptions::default()) // 确保结果按时间排序
+        .sort(["trade_time"], SortMultipleOptions::default())
         .collect()?;
+
+    // Eager模式: 类型转换（bid/ask_volume）
+    let bid_vol_u32 = grouped_df.column("bid_volume_1")?.cast(&DataType::UInt32)?;
+    let ask_vol_u32 = grouped_df.column("ask_volume_1")?.cast(&DataType::UInt32)?;
+
+    grouped_df = grouped_df
+        .with_column(bid_vol_u32)?
+        .with_column(ask_vol_u32)?
+        .clone();
 
     // 调整 trade_time: floor + 1 分钟（与on_tick的align_to_bar_minute输出格式保持一致）
     let trade_time_col = grouped_df.column("trade_time")?;
@@ -406,38 +436,37 @@ fn filter_trading_hours_bars(df: DataFrame, comd: &str) -> anyhow::Result<DataFr
 
 /// 向量化计算跨窗口指标
 fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exchange: &str) -> anyhow::Result<DataFrame> {
-    // 先执行shift操作
+    // 先执行shift操作（last_volume和last_open_interest已经在聚合前转换为Int64）
     let shifted_df = grouped_df.lazy()
         .with_columns([
             // 使用shift获取上一行的值（跨窗口）
             col("close").shift(lit(1)).alias("prev_close"),
-            col("last_volume").shift(lit(1)).alias("prev_volume"),
+            col("last_volume").shift(lit(1)).alias("prev_volume"),  // 已经是Int64
             col("last_turnover").shift(lit(1)).alias("prev_turnover"),
-            col("last_open_interest").shift(lit(1)).alias("prev_open_interest"),
+            col("last_open_interest").shift(lit(1)).alias("prev_open_interest"),  // 已经是Int64
         ])
         .collect()?;
 
     let mut bars_df = shifted_df.lazy()
         .with_columns([
-            // 计算真正的跨窗口增量
+            // 计算真正的跨窗口增量（last_volume和last_open_interest已经是Int64）
             // 特殊处理：当last < prev时（累计值被重置），直接使用last作为当前bar的volume
             // 这与on_tick的第一个bar逻辑一致：第一个bar直接使用累计值
             when(col("last_volume").lt(col("prev_volume")))
                 .then(col("last_volume"))  // 累计值被重置，直接使用当前累计值
                 .otherwise(col("last_volume") - col("prev_volume"))  // 正常差分
-                .fill_null(col("last_volume").fill_null(0))  // 第一个bar（prev_volume为NULL）用当前值
+                .fill_null(col("last_volume").fill_null(lit(0)))  // 第一个bar（prev_volume为NULL）用当前值
                 .alias("volume"),
 
             when(col("last_turnover").lt(col("prev_turnover")))
                 .then(col("last_turnover"))  // 累计值被重置，直接使用当前累计值
                 .otherwise(col("last_turnover") - col("prev_turnover"))  // 正常差分
-                .fill_null(col("last_turnover").fill_null(0.0))  // 第一个bar用当前值
+                .fill_null(col("last_turnover").fill_null(lit(0.0)))  // 第一个bar用当前值
                 .alias("turnover"),
 
-            // 计算open_interest_diff
+            // 计算open_interest_diff（已经是Int64）
             // 修正：第一个bar（prev为NULL）时，oi_diff应该为0（无前置bar无法计算差分）
-            // 之前错误地使用last_open_interest，导致第一个bar的oi_diff等于OI本身
-            (col("last_open_interest").cast(DataType::Int64) - col("prev_open_interest").cast(DataType::Int64))
+            (col("last_open_interest") - col("prev_open_interest"))
                 .fill_null(lit(0))  // 第一个bar的oi_diff=0
                 .cast(DataType::Int32)
                 .alias("open_interest_diff"),
@@ -445,16 +474,9 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
         .with_columns([
             // 计算VWAP（必须在volume和turnover计算之后）
             when(col("volume").gt(0))
-                .then(col("turnover") / col("volume"))
+                .then(col("turnover") / col("volume").cast(DataType::Float64))
                 .otherwise(lit(0.0))
                 .alias("vwap"),
-        ])
-        .with_columns([
-            // 确保数据类型正确
-            col("volume").cast(DataType::UInt32),
-            col("bid_volume_1").cast(DataType::UInt32),
-            col("ask_volume_1").cast(DataType::UInt32),
-            col("last_open_interest").alias("open_interest").cast(DataType::UInt32),
         ])
         .select([
             // 按照正确的字段顺序输出（不包含常量字段）
@@ -466,9 +488,9 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
             col("close"),
             col("prev_close"),
             col("pre_settle"),
-            col("volume"),
+            col("volume"),  // Int64类型
             col("turnover"),
-            col("open_interest"),
+            col("last_open_interest").alias("open_interest"),  // Int64类型
             col("open_interest_diff"),
             col("bid_price_1"),
             col("bid_volume_1"),
@@ -478,6 +500,16 @@ fn build_bars_vectorized(grouped_df: DataFrame, contract: &str, comd: &str, exch
             col("vwap"),
         ])
         .collect()?;
+
+    // 关键修复：collect后立即在eager模式下转换Int64回UInt32
+    let volume_u32 = bars_df.column("volume")?.cast(&DataType::UInt32)?;
+    let oi_u32 = bars_df.column("open_interest")?.cast(&DataType::UInt32)?;
+    // bid_volume_1和ask_volume_1已经是UInt32（在aggregation阶段转换）
+
+    bars_df = bars_df
+        .with_column(volume_u32)?
+        .with_column(oi_u32)?
+        .clone();
 
     // 手动计算log_return（使用真实对数，与on_tick保持一致）
     let close_col = bars_df.column("close")?;
@@ -604,14 +636,14 @@ pub fn process_parquet_optimized<P: AsRef<Path>>(parquet_path: P, output_parquet
                 .then(lit(f64::NAN))
                 .otherwise(col("ask_price_1"))
                 .alias("ask_price_1_cleaned"),
-            // volume也同步设为0
+            // volume也同步设为0（使用cast确保类型一致）
             when(col("bid_price_1").eq(lit(0.0)).or(col("bid_price_1").is_nan()))
-                .then(lit(0u32))
-                .otherwise(col("bid_volume_1"))
+                .then(lit(0).cast(DataType::UInt32))
+                .otherwise(col("bid_volume_1").cast(DataType::UInt32))
                 .alias("bid_volume_1_cleaned"),
             when(col("ask_price_1").eq(lit(0.0)).or(col("ask_price_1").is_nan()))
-                .then(lit(0u32))
-                .otherwise(col("ask_volume_1"))
+                .then(lit(0).cast(DataType::UInt32))
+                .otherwise(col("ask_volume_1").cast(DataType::UInt32))
                 .alias("ask_volume_1_cleaned"),
         ])
         .with_columns([
