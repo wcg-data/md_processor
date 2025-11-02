@@ -95,12 +95,15 @@ md_processor - 高性能期货市场数据处理系统（Rust）
 
 ## 重要文档
 
+- `5min数据完整验证报告.md` - 5min数据完整验证（2025-11-02）✨ 100%一致
+- `on_batch过滤规则严格化修复报告.md` - on_batch与on_tick过滤一致性修复（2025-11-02）✨
 - `集合竞价修复测试报告.md` - on_batch集合竞价修复测试报告（2025-10-28）
 - `集合竞价功能实现总结.md` - 集合竞价功能详解（2025-10-27）
 - `商品期货集合竞价分布完整分析.md` - 不同交易所集合竞价tick分布分析
 - `docs/fill_missing_minutes_修复总结.md` - 最后交易日停夜盘修复（2025-10-28）
 - `script/README.md` - 脚本使用说明
-- `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.4）
+- `script/run_5min_comparison.sh` - 5min数据生成和对比脚本（2025-11-02）
+- `docs/validate_tick_过滤规则.md` - 过滤规则详解（v1.5 - 2025-11-02）
 - `docs/trade_session_更新工具使用指南.md` - 交易时段配置
 - `docs/README.md` - 文档索引
 
