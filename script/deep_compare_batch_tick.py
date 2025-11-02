@@ -131,16 +131,20 @@ def deep_compare_contract(contract):
             batch_vals = batch_col.fill_null(0.0).to_numpy()
             tick_vals = tick_col.fill_null(0.0).to_numpy()
 
-            # 只在非null位置比较
+            # 只在非null且非NaN位置比较（处理NaN的关键修复）
+            # Polars的null和numpy的NaN是不同的，需要同时检查
             non_null_mask = (~batch_col.is_null()).to_numpy() & (~tick_col.is_null()).to_numpy()
+            non_nan_mask = (~np.isnan(batch_vals)) & (~np.isnan(tick_vals))
+            valid_mask = non_null_mask & non_nan_mask
 
-            if non_null_mask.sum() > 0:
-                diff = np.abs(batch_vals[non_null_mask] - tick_vals[non_null_mask])
+            if valid_mask.sum() > 0:
+                # 只在有效值位置计算差异
+                diff = np.abs(batch_vals[valid_mask] - tick_vals[valid_mask])
 
                 field_result['max_diff'] = float(diff.max())
                 field_result['mean_diff'] = float(diff.mean())
                 field_result['nonzero_diff_count'] = int((diff > 1e-10).sum())
-                field_result['nonzero_diff_ratio'] = float(field_result['nonzero_diff_count'] / non_null_mask.sum())
+                field_result['nonzero_diff_ratio'] = float(field_result['nonzero_diff_count'] / valid_mask.sum())
 
                 # 判断是否一致（考虑浮点精度）
                 if field in ['open', 'high', 'low', 'close', 'prev_close', 'pre_settle',
@@ -160,6 +164,8 @@ def deep_compare_contract(contract):
 
                     # 找出差异最大的位置（最多10个）
                     diff_full = np.abs(batch_vals - tick_vals)
+                    # 忽略NaN位置
+                    diff_full[~valid_mask] = 0
                     top_diff_indices = np.argsort(diff_full)[-10:][::-1]
 
                     top_diffs = []
@@ -168,13 +174,18 @@ def deep_compare_contract(contract):
                             top_diffs.append({
                                 'index': int(idx),
                                 'time': df_batch['trade_time'][idx],
-                                'batch_val': float(batch_vals[idx]) if not batch_col.is_null()[idx] else None,
-                                'tick_val': float(tick_vals[idx]) if not tick_col.is_null()[idx] else None,
+                                'batch_val': float(batch_vals[idx]) if valid_mask[idx] else None,
+                                'tick_val': float(tick_vals[idx]) if valid_mask[idx] else None,
                                 'diff': float(diff_full[idx])
                             })
                     field_result['top_diffs'] = top_diffs
             else:
+                # 全是null或NaN，视为一致
                 field_result['values_match'] = True
+                field_result['max_diff'] = 0.0
+                field_result['mean_diff'] = 0.0
+                field_result['nonzero_diff_count'] = 0
+                field_result['nonzero_diff_ratio'] = 0.0
 
             # 只保存有差异的字段结果
             if not field_result.get('null_positions_match', True) or not field_result.get('values_match', True):
