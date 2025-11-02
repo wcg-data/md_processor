@@ -98,10 +98,13 @@ fn read_tick_from_parquet<P: AsRef<Path>>(parquet_path: P) -> anyhow::Result<Dat
         let ask_val = ask_price_col.get(i)?;
 
         let is_valid = match (close_val, volume_val, turnover_val, bid_val, ask_val) {
-            (AnyValue::Float64(c), _, AnyValue::Float64(t), AnyValue::Float64(b), AnyValue::Float64(a)) => {
+            (AnyValue::Float64(c), AnyValue::UInt32(v), AnyValue::Float64(t), AnyValue::Float64(b), AnyValue::Float64(a)) => {
                 c > 0.0 && t >= 0.0 && b >= 0.0 && a >= 0.0
                 && (b.is_finite() || b.is_nan()) && (a.is_finite() || a.is_nan())
                 && (b == 0.0 || a == 0.0 || b <= a)
+                // 添加严格的 volume-turnover 一致性检查（与 on_tick 保持一致）
+                // 要求：volume=0时turnover必须为0或NaN；volume>0时turnover必须>0
+                && ((v == 0 && (t == 0.0 || t.is_nan())) || (v > 0 && t > 0.0))
             },
             _ => false,
         };
