@@ -382,30 +382,78 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
                 },
                 "date" => {
                     // 特殊处理date字段：为夜盘时段设置正确的交易日期
-                    let mut date_values: Vec<String> = Vec::new();
-                    for time_str in missing_times_ref {
-                        if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
-                            let hour = dt.hour();
-                            let mut trading_date = dt.date();
+                    // 需要根据模板列的实际类型来决定创建String还是Date类型
+                    let template_col = template_row.column("date")?;
+                    let col_dtype = template_col.dtype();
 
-                            // 夜盘前半段（00:00-02:30）属于前一个交易日
-                            if hour < 3 {
-                                trading_date = trading_date - chrono::Duration::days(1);
+                    match col_dtype {
+                        DataType::Date => {
+                            // 如果模板是Date类型，创建Date类型的Series
+                            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            let mut date_values: Vec<i32> = Vec::new();
+
+                            for time_str in missing_times_ref {
+                                if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                                    let hour = dt.hour();
+                                    let mut trading_date = dt.date();
+
+                                    // 夜盘前半段（00:00-02:30）属于前一个交易日
+                                    if hour < 3 {
+                                        trading_date = trading_date - chrono::Duration::days(1);
+                                    }
+
+                                    // 计算从epoch开始的天数
+                                    let days_since_epoch = (trading_date - epoch).num_days() as i32;
+                                    date_values.push(days_since_epoch);
+                                } else {
+                                    // 解析失败时使用模板值
+                                    let template_val = template_col.get(0)?;
+                                    if let AnyValue::Date(d) = template_val {
+                                        date_values.push(d);
+                                    } else {
+                                        date_values.push(0);
+                                    }
+                                }
                             }
+                            Series::new("date", date_values).cast(&DataType::Date)?
+                        },
+                        DataType::String => {
+                            // 如果模板是String类型，创建String类型的Series
+                            let mut date_values: Vec<String> = Vec::new();
 
-                            date_values.push(trading_date.format("%Y-%m-%d").to_string());
-                        } else {
-                            // 解析失败时使用模板值
-                            let template_col = template_row.column("date")?;
+                            for time_str in missing_times_ref {
+                                if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S") {
+                                    let hour = dt.hour();
+                                    let mut trading_date = dt.date();
+
+                                    // 夜盘前半段（00:00-02:30）属于前一个交易日
+                                    if hour < 3 {
+                                        trading_date = trading_date - chrono::Duration::days(1);
+                                    }
+
+                                    date_values.push(trading_date.format("%Y-%m-%d").to_string());
+                                } else {
+                                    // 解析失败时使用模板值
+                                    let template_val = template_col.get(0)?;
+                                    if let AnyValue::String(s) = template_val {
+                                        date_values.push(s.to_string());
+                                    } else {
+                                        date_values.push("1970-01-01".to_string());
+                                    }
+                                }
+                            }
+                            Series::new("date", date_values)
+                        },
+                        _ => {
+                            // 其他类型，回退到模板值
                             let template_val = template_col.get(0)?;
-                            if let AnyValue::String(s) = template_val {
-                                date_values.push(s.to_string());
+                            if let Ok(f64_val) = template_val.try_extract::<f64>() {
+                                Series::new("date", vec![f64_val; count])
                             } else {
-                                date_values.push("".to_string());
+                                Series::new_null("date", count)
                             }
                         }
                     }
-                    Series::new("date", date_values)
                 },
                 _ => {
                     // 其他字段从模板复制
@@ -517,6 +565,14 @@ pub fn fill_missing_minutes(bars_df: DataFrame) -> anyhow::Result<DataFrame> {
                                 eprintln!("警告: 无法扩展Decimal类型字段 '{}', 使用空值", field_name);
                                 Series::new_null(field_name, count)
                             })
+                        },
+                        DataType::Date => {
+                            // 处理Date类型（复制模板值）
+                            if let AnyValue::Date(d) = template_val {
+                                Series::new(field_name, vec![d; count]).cast(&DataType::Date).unwrap()
+                            } else {
+                                Series::new_null(field_name, count)
+                            }
                         },
                         _ => {
                             // 对于其他未知类型，尝试提取为f64
